@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bitácora Spotting</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%2315202b'/><path d='M6 18l20-6-3 4 3 1-20 3z' fill='%23f0b429'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Bitácora <span>Spotting</span></h1>
+      <p class="sub" id="who"></p>
+    </div>
+    <nav id="nav" hidden>
+      <button class="tab" data-view="log" aria-current="page">Bitácora</button>
+      <button class="tab" data-view="add">Registrar carpeta</button>
+      <button class="btn ghost" id="logout">Salir</button>
+    </nav>
+  </header>
+
+  <!-- ACCESO -->
+  <section id="v-auth" class="panel narrow" hidden>
+    <h2>Acceso beta</h2>
+    <p class="muted">Usa tu correo y una contraseña. Si es la primera vez, pulsa «Crear cuenta».</p>
+    <form id="authForm" class="stack">
+      <label class="lbl" for="email">Correo</label>
+      <input type="email" id="email" autocomplete="email" required>
+      <label class="lbl" for="pass">Contraseña (mínimo 6 caracteres)</label>
+      <input type="password" id="pass" autocomplete="current-password" minlength="6" required>
+      <div class="row">
+        <button class="btn primary" type="submit" id="loginBtn">Entrar</button>
+        <button class="btn" type="button" id="signupBtn">Crear cuenta</button>
+      </div>
+      <p class="msg" id="authMsg" role="status"></p>
+    </form>
+  </section>
+
+  <!-- BITÁCORA -->
+  <section id="v-log" hidden>
+    <div class="panel controls">
+      <input type="search" id="q" placeholder="Buscar matrícula, tipo, operador, carpeta o nº de archivo" aria-label="Buscar">
+      <div class="chips" role="group" aria-label="Filtro">
+        <button class="chip" data-f="all" aria-pressed="true">Todas</button>
+        <button class="chip" data-f="pend" aria-pressed="false">Pendientes <b id="cPend"></b></button>
+        <button class="chip" data-f="ok" aria-pressed="false">Aprobadas</button>
+      </div>
+      <button class="btn" id="exportBtn">Exportar CSV</button>
+    </div>
+    <p class="stat" id="logStat"></p>
+    <div id="entries" class="entries"></div>
+    <div class="empty panel" id="logEmpty" hidden>
+      <h2>Tu bitácora está vacía</h2>
+      <p class="muted">Pulsa «Registrar carpeta», elige una carpeta de RAW y guarda las ráfagas. Aparecerán aquí como pendientes para que las revises.</p>
+    </div>
+  </section>
+
+  <!-- REGISTRAR -->
+  <section id="v-add" hidden>
+    <div class="panel controls">
+      <input type="file" id="pick" webkitdirectory directory multiple hidden>
+      <button class="btn primary" id="pickBtn">Elegir carpeta</button>
+      <label class="field" for="gap">Nueva ráfaga tras <input type="number" id="gap" value="8" min="1" max="120"> s</label>
+      <label class="field" for="apt">Aeropuerto <input type="text" id="apt" placeholder="LEVC" maxlength="4" class="icao"></label>
+      <div class="progress" aria-hidden="true"><i id="bar"></i></div>
+      <span class="stat" id="addStat">Los RAW se leen en tu ordenador; solo se guarda una miniatura de la foto elegida.</span>
+    </div>
+    <div id="bursts" class="bursts"></div>
+    <div class="panel savebar" id="saveBar" hidden>
+      <span class="stat" id="saveStat"></span>
+      <button class="btn primary" id="saveBtn">Guardar en la bitácora</button>
+    </div>
+  </section>
+
+  <!-- EDITOR -->
+  <dialog id="editor">
+    <form method="dialog" id="edForm" class="stack">
+      <img id="edImg" alt="" class="edimg">
+      <div class="grid2">
+        <label class="lbl">Matrícula<input type="text" id="edReg" class="reg"></label>
+        <label class="lbl">Fecha<input type="date" id="edFecha"></label>
+        <label class="lbl">Tipo<input type="text" id="edTipo"></label>
+        <label class="lbl">Operador<input type="text" id="edOp"></label>
+        <label class="lbl">Aeropuerto<input type="text" id="edApt" class="icao" maxlength="4"></label>
+        <label class="lbl">Carpeta<input type="text" id="edCarp"></label>
+        <label class="lbl">Archivo<input type="text" id="edN"></label>
+        <label class="lbl">Archivo 2<input type="text" id="edX"></label>
+      </div>
+      <label class="lbl">Nota<textarea id="edNota" rows="2"></textarea></label>
+      <div class="row between">
+        <div class="row">
+          <button class="btn danger" type="button" id="edDel">Borrar</button>
+          <button class="btn danger solid" type="button" id="edDelYes" hidden>Sí, borrar</button>
+        </div>
+        <div class="row">
+          <button class="btn" value="cancel">Cancelar</button>
+          <button class="btn" type="button" id="edSave">Guardar</button>
+          <button class="btn primary" type="button" id="edApprove">Aprobar</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status" hidden></div>
+</div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
