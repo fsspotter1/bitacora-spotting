@@ -138,6 +138,26 @@ $('#exportBtn').onclick = () => {
   a.download = `Bitacora spotting ${ymd(Date.now())}.csv`; a.click();
 };
 
+/* empezar de cero */
+$('#resetTxt').addEventListener('input', e => $('#resetBtn').disabled = e.target.value.trim().toUpperCase() !== 'BORRAR');
+$('#resetBtn').onclick = async () => {
+  const msg = $('#resetMsg'); $('#resetBtn').disabled = true; msg.className = 'msg'; msg.textContent = 'Borrando…';
+  // miniaturas
+  let removed = 0;
+  for (;;) {
+    const { data, error } = await sb.storage.from('thumbs').list(user.id, { limit: 100 });
+    if (error || !data?.length) break;
+    const paths = data.map(o => `${user.id}/${o.name}`);
+    const r = await sb.storage.from('thumbs').remove(paths); if (r.error) break;
+    removed += paths.length; msg.textContent = `Borrando miniaturas… ${removed}`;
+  }
+  const { error } = await sb.from('entries').delete().eq('user_id', user.id);
+  if (error) { msg.className = 'msg err'; msg.textContent = 'No se pudo borrar: ' + error.message; $('#resetBtn').disabled = false; return; }
+  S.entries = []; S.thumbs.clear(); bursts = []; $('#bursts').innerHTML = ''; $('#saveBar').hidden = true;
+  $('#resetTxt').value = ''; $('#resetZone').open = false; msg.textContent = '';
+  renderLog(); toast('Bitácora vacía: puedes empezar de cero');
+};
+
 /* ---------------- registrar carpeta ---------------- */
 let bursts = [], folder = '';
 $('#pickBtn').onclick = () => $('#pick').click();

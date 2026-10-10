@@ -57,6 +57,15 @@
       <h2>Tu bitácora está vacía</h2>
       <p class="muted">Pulsa «Registrar carpeta», elige una carpeta de RAW y guarda las ráfagas. Aparecerán aquí como pendientes para que las revises.</p>
     </div>
+    <details class="panel danger-zone" id="resetZone">
+      <summary>Empezar de cero (pruebas)</summary>
+      <p class="muted">Borra <b>todos</b> los registros y miniaturas de tu cuenta. Tus RAW no se tocan: están en tu ordenador. No se puede deshacer.</p>
+      <div class="row">
+        <label class="lbl" for="resetTxt">Escribe BORRAR para confirmar<input type="text" id="resetTxt" autocomplete="off"></label>
+        <button class="btn danger solid" id="resetBtn" disabled>Borrar todo</button>
+      </div>
+      <p class="msg" id="resetMsg" role="status"></p>
+    </details>
   </section>
 
   <!-- REGISTRAR -->

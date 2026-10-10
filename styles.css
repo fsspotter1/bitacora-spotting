@@ -101,3 +101,7 @@ dialog::backdrop{background:rgba(10,15,20,.55)}
 .edimg{width:100%;border-radius:6px;background:var(--strip);aspect-ratio:3/2;object-fit:cover}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
 #toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 16px;border-radius:6px;font-size:.9rem;z-index:10}
+.danger-zone{border-color:var(--warn)}
+.danger-zone summary{cursor:pointer;font-weight:600;color:var(--warn)}
+.danger-zone[open] summary{margin-bottom:8px}
+.danger-zone .row{align-items:end}
