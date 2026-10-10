@@ -1,5 +1,5 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
-import { RAW_RE, readFrame, captureTime, analyse, pickBest } from './raw.js';
+import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff } from './raw.js';
 
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_lXi2rPoZx8ofeM46jqwBlA_PaSQ2JSX'; // clave pública
@@ -158,35 +158,73 @@ $('#pick').onchange = async ev => {
   const gap = (+$('#gap').value || 8) * 1000; let cur = [];
   frames.forEach((f, i) => { if (i && f.t - frames[i - 1].t > gap) { bursts.push({ frames: cur }); cur = []; } cur.push(f); });
   if (cur.length) bursts.push({ frames: cur });
-  bursts.forEach((b, i) => Object.assign(b, { id: i, reg: '', type: '', op: '', on: true }));
+  bursts.forEach(b => Object.assign(b, { reg: '', type: '', op: '', on: true }));
+  renumber();
   done = 0;
   for (const b of bursts) {
     const queue = [...b.frames];
     await Promise.all([0, 1, 2].map(async () => { while (queue.length) { const f = queue.shift(); if (!f.err) { try { Object.assign(f, await analyse(f.blob)); } catch { f.err = true; } } done++; } }));
     pickBest(b); renderBurst(b); prog(`Analizando ${done}/${total} · ráfaga ${b.id + 1}/${bursts.length}`);
   }
+  markSimilar(); renderAll();
   $('#bar').style.width = '100%';
-  $('#addStat').textContent = `${total} archivos · ${bursts.length} ráfagas · ${folder}`;
   $('#pickBtn').disabled = false; $('#saveBar').hidden = false; updateSave();
 };
+function renumber() { bursts.forEach((b, i) => b.id = i); }
+const lastOk = b => [...b.frames].reverse().find(f => f.sig), firstOk = b => b.frames.find(f => f.sig);
+// Avión parado (nocturnas, rampa): ráfagas separadas en el tiempo pero con la misma escena
+function markSimilar() {
+  bursts.forEach((b, i) => {
+    const p = bursts[i - 1];
+    b.similar = !!p && b.frames[0].t - p.frames[p.frames.length - 1].t < 20 * 60 * 1000 && sceneDiff(lastOk(p)?.sig, firstOk(b)?.sig) < 0.35;
+  });
+}
+function renderAll() {
+  $('#bursts').innerHTML = ''; bursts.forEach(renderBurst);
+  const sim = bursts.filter(b => b.similar).length;
+  $('#addStat').textContent = `${bursts.reduce((a, b) => a + b.frames.length, 0)} archivos · ${bursts.length} ráfagas · ${folder}` + (sim ? ` · ${sim} ${sim === 1 ? 'parece' : 'parecen'} el mismo avión que la anterior (revisa «Unir con la anterior»)` : '');
+}
+function mergeWithPrev(i) {
+  const p = bursts[i - 1], b = bursts[i]; if (!p || !b) return;
+  p.frames = p.frames.concat(b.frames);
+  ['reg', 'type', 'op'].forEach(k => { if (!p[k] && b[k]) p[k] = b[k]; });
+  bursts.splice(i, 1); pickBest(p); delete p.view; renumber(); markSimilar(); renderAll(); updateSave();
+  document.getElementById('b' + p.id)?.scrollIntoView({ block: 'nearest' });
+}
+function splitAt(i, name) {
+  const b = bursts[i]; const k = b.frames.findIndex(f => f.name === name); if (k <= 0) return;
+  const nb = { frames: b.frames.slice(k), reg: '', type: '', op: '', on: true };
+  b.frames = b.frames.slice(0, k); pickBest(b); pickBest(nb); delete b.view;
+  bursts.splice(i + 1, 0, nb); renumber(); markSimilar(); renderAll(); updateSave();
+}
 const hm = t => new Date(t).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 function renderBurst(b) {
   let el = document.getElementById('b' + b.id);
   if (!el) { el = document.createElement('article'); el.id = 'b' + b.id; $('#bursts').appendChild(el); }
   el.className = 'burst' + (b.on ? '' : ' off');
-  const nF = b.frames.find(f => f.name === b.n); const k = b.frames.length;
+  const view = b.view || b.n; const vF = b.frames.find(f => f.name === view); const k = b.frames.length;
+  const role = view === b.n ? 'Principal' : view === b.x ? 'Segunda' : 'Viendo';
   el.innerHTML = `
-    <div class="hero">${nF?.large ? `<img src="${nF.large}" alt="Toma elegida ${esc(base(b.n))}">` : ''}<span class="badge">N · ${esc(b.n ? base(b.n) : '—')}</span></div>
+    <div class="side">
+      <div class="hero">${vF?.large ? `<img src="${vF.large}" alt="${esc(base(view))}">` : ''}<span class="badge ${role === 'Segunda' ? 'x' : role === 'Viendo' ? 'v' : ''}">${role} · ${esc(view ? base(view) : '—')}</span></div>
+      <div class="row">
+        <button class="btn sm ${view === b.n ? 'on' : ''}" data-act="n" ${view === b.n ? 'disabled' : ''}>★ Principal</button>
+        <button class="btn sm ${view === b.x ? 'on x' : ''}" data-act="x">${view === b.x ? 'Quitar segunda' : 'Segunda'}</button>
+        ${view !== b.frames[0].name && k > 1 ? '<button class="btn sm ghost" data-act="split" title="Esta foto y las siguientes pasan a otra ráfaga">Separar desde aquí</button>' : ''}
+      </div>
+    </div>
     <div class="meta">
-      <div class="row"><span class="time">${hm(b.frames[0].t)}</span><span class="files">${esc(base(b.frames[0].name))} – ${esc(base(b.frames[k - 1].name))} · ${k} ${k === 1 ? 'foto' : 'fotos'}${b.x ? ` · X ${esc(base(b.x))}` : ''}</span></div>
+      ${b.similar ? `<div class="similar"><span>Parece el mismo avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Unir con la anterior</button></div>` : ''}
+      <div class="row"><span class="time">${hm(b.frames[0].t)}</span><span class="files">${esc(base(b.frames[0].name))} – ${esc(base(b.frames[k - 1].name))} · ${k} ${k === 1 ? 'foto' : 'fotos'}</span>
+        ${b.id > 0 && !b.similar ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}</div>
       <div class="inputs">
         <input type="text" class="reg" data-k="reg" placeholder="Matrícula" value="${esc(b.reg)}" aria-label="Matrícula">
         <input type="text" data-k="type" placeholder="Tipo (A320)" value="${esc(b.type)}" aria-label="Tipo">
         <input type="text" data-k="op" placeholder="Operador" value="${esc(b.op)}" aria-label="Operador">
         <label class="field"><input type="checkbox" data-k="on" ${b.on ? 'checked' : ''}> Guardar</label>
       </div>
-      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === b.n ? 'n' : ''} ${f.name === b.x ? 'x' : ''}" data-b="${b.id}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.err ? '<span class="bad">sin previa</span>' : (f.touches ? '<span class="bad">cortado</span>' : '')}<span>${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
-      <p class="hint">Clic: foto principal (N) · Mayús+clic: segunda foto (X)</p>
+      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : (f.touches ? '<span class="bad">cortado</span>' : '')}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
+      <p class="hint">Haz clic en una miniatura para verla en grande y elige si es la <b>principal (★ N)</b> o la <b>segunda (X)</b>.</p>
     </div>`;
   el.querySelectorAll('input[data-k]').forEach(i => i.oninput = i.onchange = () => {
     const kk = i.dataset.k; b[kk] = kk === 'on' ? i.checked : (kk === 'reg' ? i.value.toUpperCase().trim() : i.value.trim());
@@ -194,9 +232,16 @@ function renderBurst(b) {
   });
 }
 $('#bursts').addEventListener('click', e => {
-  const t = e.target.closest('.th'); if (!t) return;
-  const b = bursts[+t.dataset.b], f = t.dataset.f;
-  if (e.shiftKey) { b.x = b.x === f ? '' : f; if (b.x === b.n) b.x = ''; } else { if (b.x === f) b.x = b.n; b.n = f; }
+  const art = e.target.closest('.burst'); if (!art) return;
+  const b = bursts[+art.id.slice(1)]; if (!b) return;
+  const t = e.target.closest('.th');
+  if (t) { b.view = t.dataset.f; renderBurst(b); return; }
+  const a = e.target.closest('[data-act]'); if (!a) return;
+  const view = b.view || b.n;
+  if (a.dataset.act === 'n') { if (b.x === view) b.x = b.n; b.n = view; }
+  else if (a.dataset.act === 'x') { b.x = b.x === view ? '' : view; if (b.x === b.n) b.x = ''; }
+  else if (a.dataset.act === 'merge') return mergeWithPrev(b.id);
+  else if (a.dataset.act === 'split') return splitAt(b.id, view);
   renderBurst(b);
 });
 function updateSave() { const n = bursts.filter(b => b.on && b.n).length; $('#saveStat').textContent = `${n} ráfagas se guardarán como pendientes en «${folder}»`; $('#saveBtn').disabled = !n; }

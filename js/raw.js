@@ -85,7 +85,14 @@ export async function analyse(blob) {
   let s = 0, s2 = 0, n = 0;
   for (let y = Math.max(1, y0); y < Math.min(H - 1, y1); y++) for (let x = Math.max(1, x0); x < Math.min(W - 1, x1); x++) { const i = y * W + x; const l = -4 * gray[i] + gray[i - 1] + gray[i + 1] + gray[i - W] + gray[i + W]; s += l; s2 += l * l; n++; }
   const m = 0.012;
+  // firma 16x12 normalizada para comparar si dos fotos muestran la misma escena
+  const sc = document.createElement('canvas'); sc.width = 16; sc.height = 12; sc.getContext('2d').drawImage(c, 0, 0, 16, 12);
+  const sd = sc.getContext('2d').getImageData(0, 0, 16, 12).data; const sig = new Float32Array(192);
+  let mu = 0; for (let i = 0; i < 192; i++) { sig[i] = 0.299 * sd[i * 4] + 0.587 * sd[i * 4 + 1] + 0.114 * sd[i * 4 + 2]; mu += sig[i]; } mu /= 192;
+  let sdv = 0; for (let i = 0; i < 192; i++) sdv += (sig[i] - mu) ** 2; sdv = Math.sqrt(sdv / 192) || 1;
+  for (let i = 0; i < 192; i++) sig[i] = (sig[i] - mu) / sdv;
   return {
+    sig,
     sharp: n ? (s2 / n - (s / n) ** 2) : 0,
     touches: (x0 <= W * m) + (x1 >= W * (1 - m)) + (y0 <= H * m) + (y1 >= H * (1 - m)),
     fill: (x1 - x0) / W,
@@ -108,3 +115,6 @@ export function pickBest(b) {
     .sort((a, c) => Math.abs(idx(c) - idx(sorted[0])) - Math.abs(idx(a) - idx(sorted[0])))[0];
   b.x = alt ? alt.name : (sorted[1] ? sorted[1].name : '');
 }
+
+// 0 = idénticas; >0.6 suele ser otra escena
+export function sceneDiff(a, b) { if (!a || !b) return 9; let d = 0; for (let i = 0; i < a.length; i++) d += Math.abs(a[i] - b[i]); return d / a.length; }

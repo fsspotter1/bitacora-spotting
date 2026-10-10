@@ -64,7 +64,7 @@
     <div class="panel controls">
       <input type="file" id="pick" webkitdirectory directory multiple hidden>
       <button class="btn primary" id="pickBtn">Elegir carpeta</button>
-      <label class="field" for="gap">Nueva ráfaga tras <input type="number" id="gap" value="8" min="1" max="120"> s</label>
+      <label class="field" for="gap" title="Si entre dos fotos pasan más segundos que esto, la web entiende que es otro avión">Otro avión si pasan más de <input type="number" id="gap" value="8" min="1" max="600"> s entre fotos</label>
       <label class="field" for="apt">Aeropuerto <input type="text" id="apt" placeholder="LEVC" maxlength="4" class="icao"></label>
       <div class="progress" aria-hidden="true"><i id="bar"></i></div>
       <span class="stat" id="addStat">Los RAW se leen en tu ordenador; solo se guarda una miniatura de la foto elegida.</span>
