@@ -1,6 +1,6 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
-import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff } from './raw.js';
-import { loadDetector } from './detect.js';
+import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff, splitByAircraft } from './raw.js';
+import { loadDetector, loadEmbedder } from './detect.js';
 
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_lXi2rPoZx8ofeM46jqwBlA_PaSQ2JSX'; // clave pública
@@ -161,7 +161,7 @@ $('#resetBtn').onclick = async () => {
 
 /* ---------------- registrar carpeta ---------------- */
 let bursts = [], folder = '';
-$('#pickBtn').onclick = () => { loadDetector(); $('#pick').click(); };
+$('#pickBtn').onclick = () => { loadDetector(); loadEmbedder(); $('#pick').click(); };
 $('#pick').onchange = async ev => {
   const files = [...ev.target.files].filter(f => RAW_RE.test(f.name) && !f.name.startsWith('.'));
   ev.target.value = '';
@@ -182,10 +182,19 @@ $('#pick').onchange = async ev => {
   bursts.forEach(b => Object.assign(b, { reg: '', type: '', op: '', on: true }));
   renumber();
   done = 0;
-  for (const b of bursts) {
-    const queue = [...b.frames];
+  let splits = 0;
+  for (let bi = 0; bi < bursts.length; bi++) {
+    const b = bursts[bi], queue = [...b.frames];
     await Promise.all([0, 1, 2].map(async () => { while (queue.length) { const f = queue.shift(); if (!f.err) { try { Object.assign(f, await analyse(f.blob)); } catch { f.err = true; } } done++; } }));
-    pickBest(b); if (b.loose) b.on = false; renderBurst(b); prog(`Analizando ${done}/${total} · ráfaga ${b.id + 1}/${bursts.length}`);
+    // en el spot se dispara sin pausa a aviones seguidos: si cambia el avión, es otro registro
+    const parts = splitByAircraft(b.frames);
+    if (parts.length > 1) {
+      const nbs = parts.map((fr, k) => k ? { frames: fr, reg: '', type: '', op: '', on: true, auto: true } : Object.assign(b, { frames: fr }));
+      bursts.splice(bi, 1, ...nbs); renumber(); splits += parts.length - 1;
+      nbs.forEach(x => { pickBest(x); if (x.loose) x.on = false; });
+      bi += nbs.length - 1; $('#bursts').innerHTML = ''; bursts.slice(0, bi + 1).forEach(renderBurst);
+    } else { pickBest(b); if (b.loose) b.on = false; renderBurst(b); }
+    prog(`Analizando ${done}/${total} · ráfaga ${bi + 1}/${bursts.length}` + (splits ? ` · ${splits} separadas por cambio de avión` : ''));
   }
   markSimilar(); renderAll();
   $('#bar').style.width = '100%';
@@ -197,7 +206,7 @@ const lastOk = b => [...b.frames].reverse().find(f => f.sig), firstOk = b => b.f
 function markSimilar() {
   bursts.forEach((b, i) => {
     const p = bursts[i - 1];
-    b.similar = !!p && b.frames[0].t - p.frames[p.frames.length - 1].t < 20 * 60 * 1000 && sceneDiff(lastOk(p)?.sig, firstOk(b)?.sig) < 0.35;
+    b.similar = !b.auto && !!p && b.frames[0].t - p.frames[p.frames.length - 1].t < 20 * 60 * 1000 && sceneDiff(lastOk(p)?.sig, firstOk(b)?.sig) < 0.35;
   });
 }
 function renderAll() {
@@ -209,12 +218,12 @@ function mergeWithPrev(i) {
   const p = bursts[i - 1], b = bursts[i]; if (!p || !b) return;
   p.frames = p.frames.concat(b.frames);
   ['reg', 'type', 'op'].forEach(k => { if (!p[k] && b[k]) p[k] = b[k]; });
-  bursts.splice(i, 1); pickBest(p); delete p.view; renumber(); markSimilar(); renderAll(); updateSave();
+  bursts.splice(i, 1); delete b.auto; pickBest(p); delete p.view; renumber(); markSimilar(); renderAll(); updateSave();
   document.getElementById('b' + p.id)?.scrollIntoView({ block: 'nearest' });
 }
 function splitAt(i, name) {
   const b = bursts[i]; const k = b.frames.findIndex(f => f.name === name); if (k <= 0) return;
-  const nb = { frames: b.frames.slice(k), reg: '', type: '', op: '', on: true };
+  const nb = { frames: b.frames.slice(k), reg: '', type: '', op: '', on: true, auto: false };
   b.frames = b.frames.slice(0, k); pickBest(b); pickBest(nb); delete b.view;
   bursts.splice(i + 1, 0, nb); renumber(); markSimilar(); renderAll(); updateSave();
 }
@@ -236,9 +245,10 @@ function renderBurst(b) {
     </div>
     <div class="meta">
       ${b.similar ? `<div class="similar"><span>Parece el mismo avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Unir con la anterior</button></div>` : ''}
+      ${b.auto ? '<div class="similar"><span>Separada automáticamente: parece otro avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Es el mismo: unir</button></div>' : ''}
       ${b.loose && !b.on ? '<p class="warnline">Toma suelta: parece un disparo sin finalidad o el inicio de una ráfaga. No se guardará salvo que marques «Guardar».</p>' : b.warn ? `<p class="warnline">⚠ ${esc(b.warn)}: revisa la ráfaga.</p>` : ''}
       <div class="row"><span class="time">${hm(b.frames[0].t)}</span><span class="files">${esc(base(b.frames[0].name))} – ${esc(base(b.frames[k - 1].name))} · ${k} ${k === 1 ? 'foto' : 'fotos'}</span>
-        ${b.id > 0 && !b.similar ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}</div>
+        ${b.id > 0 && !b.similar && !b.auto ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}</div>
       <div class="inputs">
         <input type="text" class="reg" data-k="reg" placeholder="Matrícula" value="${esc(b.reg)}" aria-label="Matrícula">
         <input type="text" data-k="type" placeholder="Tipo (A320)" value="${esc(b.type)}" aria-label="Tipo">

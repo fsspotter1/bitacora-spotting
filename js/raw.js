@@ -1,5 +1,5 @@
 // Lectura local de RAW: vista previa JPEG embebida + hora de captura. Nada sale del ordenador.
-import { detect } from './detect.js';
+import { detect, embed } from './detect.js';
 export const RAW_RE = /\.(nef|nrw|cr2|cr3|arw|dng|raf|orf|rw2|pef|jpe?g)$/i;
 
 function parseTiff(buf) {
@@ -104,6 +104,15 @@ export async function analyse(blob) {
     [x0, x1] = span(colS); [y0, y1] = span(rowS);
     const m = 0.012; touches = (x0 <= W * m) + (x1 >= W * (1 - m)) + (y0 <= H * m) + (y1 >= H * (1 - m));
   }
+  // huella del avión (para separar aviones distintos dentro de una misma ráfaga)
+  let emb = null;
+  if (found) {
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, side = Math.max(x1 - x0, y1 - y0) * 1.05;
+    const e = document.createElement('canvas'); e.width = e.height = 224;
+    const eg = e.getContext('2d', { willReadFrequently: true }); eg.fillStyle = '#000'; eg.fillRect(0, 0, 224, 224);
+    eg.drawImage(c, cx - side / 2, cy - side / 2, side, side, 0, 0, 224, 224);
+    emb = await embed(e).catch(() => null);
+  }
   // nitidez (varianza del laplaciano) solo dentro del avión
   let s = 0, s2 = 0, n = 0;
   for (let y = Math.max(1, y0); y < Math.min(H - 1, y1); y++) for (let x = Math.max(1, x0); x < Math.min(W - 1, x1); x++) { const i = y * W + x; const l = -4 * gray[i] + gray[i - 1] + gray[i + 1] + gray[i - W] + gray[i + W]; s += l; s2 += l * l; n++; }
@@ -127,7 +136,7 @@ export async function analyse(blob) {
   let sdv = 0; for (let i = 0; i < 192; i++) sdv += (sig[i] - mu) ** 2; sdv = Math.sqrt(sdv / 192) || 1;
   for (let i = 0; i < 192; i++) sig[i] = (sig[i] - mu) / sdv;
   return {
-    sig, obst, found,
+    sig, obst, found, emb,
     sharp: n ? (s2 / n - (s / n) ** 2) : 0,
     touches,
     fill: (x1 - x0) / W,
@@ -164,6 +173,24 @@ export function pickBest(b) {
   // Toma suelta (1–2 fotos sin ninguna limpia, o con el avión diminuto): casi siempre un disparo
   // sin finalidad o el arranque de la ráfaga; se desmarca para no guardarla salvo que el usuario quiera
   b.loose = ok.length <= 2 && (best.fill < 0.12 || ok.every(f => f.found === false));
+}
+
+// Parte una ráfaga donde cambia el avión (huella distinta de las últimas tomas y que se mantiene en las siguientes).
+// Devuelve una lista de listas de fotos. Sin huellas (detector no disponible) no parte nada.
+export function splitByAircraft(frames, T = 0.12) {
+  const parts = [[]]; let ref = [];
+  const cos = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+  const mean = vs => { const m = new Float32Array(vs[0].length); vs.forEach(v => v.forEach((x, i) => m[i] += x)); let n = 0; m.forEach(x => n += x * x); n = Math.sqrt(n) || 1; return m.map(x => x / n); };
+  frames.forEach((f, i) => {
+    if (f.emb && ref.length) {
+      const r = mean(ref.slice(-3)), d = 1 - cos(r, f.emb);
+      const next = frames.slice(i + 1).filter(n => n.emb).slice(0, 2);
+      const persists = next.every(n => 1 - cos(r, n.emb) > T * 0.8);
+      if (d > T && persists && parts[parts.length - 1].length) { parts.push([]); ref = []; }
+    }
+    parts[parts.length - 1].push(f); if (f.emb) ref.push(f.emb);
+  });
+  return parts;
 }
 
 // 0 = idénticas; >0.6 suele ser otra escena
