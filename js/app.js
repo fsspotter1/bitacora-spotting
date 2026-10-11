@@ -255,8 +255,8 @@ function renderBurst(b) {
         <input type="text" data-k="op" placeholder="Operador" value="${esc(b.op)}" aria-label="Operador">
         <label class="field"><input type="checkbox" data-k="on" ${b.on ? 'checked' : ''}> Guardar</label>
       </div>
-      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : f.touches ? '<span class="bad">cortado</span>' : f.obst ? '<span class="bad">algo delante</span>' : f.soft ? '<span class="bad">desenfocada</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
-      <p class="hint">Haz clic en una miniatura para verla en grande y elige si es la <b>principal (★ N)</b> o la <b>segunda (X)</b>.</p>
+      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : f.touches ? '<span class="bad">cortado</span>' : f.obst ? '<span class="bad">algo delante</span>' : f.soft ? '<span class="bad soft">¿menos nítida?</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
+      <p class="hint">Haz clic en la foto grande para verla a pantalla completa, y en una miniatura para verla en grande y elige si es la <b>principal (★ N)</b> o la <b>segunda (X)</b>.</p>
     </div>`;
   el.querySelectorAll('input[data-k]').forEach(i => i.oninput = i.onchange = () => {
     const kk = i.dataset.k; b[kk] = kk === 'on' ? i.checked : (kk === 'reg' ? i.value.toUpperCase().trim() : i.value.trim());
@@ -266,6 +266,7 @@ function renderBurst(b) {
 $('#bursts').addEventListener('click', e => {
   const art = e.target.closest('.burst'); if (!art) return;
   const b = bursts[+art.id.slice(1)]; if (!b) return;
+  if (e.target.matches('.hero img')) { const z = document.createElement('div'); z.id = 'zoom'; z.innerHTML = `<img src="${e.target.src}" alt="">`; z.onclick = () => z.remove(); document.body.appendChild(z); return; }
   const t = e.target.closest('.th');
   if (t) { b.view = t.dataset.f; renderBurst(b); return; }
   const a = e.target.closest('[data-act]'); if (!a) return;

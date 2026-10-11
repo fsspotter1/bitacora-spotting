@@ -72,8 +72,7 @@ export async function analyse(blob) {
   const bmp = await createImageBitmap(blob);
   const W = 720, H = Math.round(bmp.height * W / bmp.width);
   const mk = w => { const k = document.createElement('canvas'); k.width = w; k.height = Math.round(bmp.height * w / bmp.width); k.getContext('2d', { willReadFrequently: true }).drawImage(bmp, 0, 0, k.width, k.height); return k; };
-  const c = mk(W), det = mk(640), small = mk(240), big = mk(900), keep = mk(480);
-  if (bmp.close) bmp.close();
+  const c = mk(W), det = mk(640), small = mk(320), big = mk(1600), keep = mk(480);
   const px = c.getContext('2d').getImageData(0, 0, W, H).data, gray = new Float32Array(W * H);
   for (let i = 0; i < W * H; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
   let x0, x1, y0, y1, obst = 0, found = false, touches;
@@ -114,8 +113,18 @@ export async function analyse(blob) {
     emb = await embed(e).catch(() => null);
   }
   // nitidez (varianza del laplaciano) solo dentro del avión
+  // nitidez (varianza del laplaciano) dentro del avión, medida sobre el recorte a resolución real
+  // (a 720 px un avión pequeño ocupa pocos píxeles y cualquier toma parece blanda)
   let s = 0, s2 = 0, n = 0;
-  for (let y = Math.max(1, y0); y < Math.min(H - 1, y1); y++) for (let x = Math.max(1, x0); x < Math.min(W - 1, x1); x++) { const i = y * W + x; const l = -4 * gray[i] + gray[i - 1] + gray[i + 1] + gray[i - W] + gray[i + W]; s += l; s2 += l * l; n++; }
+  {
+    const sx = bmp.width / W, cw = Math.max(8, (x1 - x0) * sx), ch = Math.max(8, (y1 - y0) * sx);
+    const k = Math.min(1, 1000 / cw), CW = Math.round(cw * k), CH = Math.round(ch * k);
+    const cc = document.createElement('canvas'); cc.width = CW; cc.height = CH;
+    const cg = cc.getContext('2d', { willReadFrequently: true }); cg.drawImage(bmp, x0 * sx, y0 * sx, cw, ch, 0, 0, CW, CH);
+    const q = cg.getImageData(0, 0, CW, CH).data, gg = new Float32Array(CW * CH);
+    for (let i = 0; i < CW * CH; i++) gg[i] = 0.299 * q[i * 4] + 0.587 * q[i * 4 + 1] + 0.114 * q[i * 4 + 2];
+    for (let y = 1; y < CH - 1; y++) for (let x = 1; x < CW - 1; x++) { const i = y * CW + x; const l = -4 * gg[i] + gg[i - 1] + gg[i + 1] + gg[i - CW] + gg[i + CW]; s += l; s2 += l * l; n++; }
+  }
   // poste o valla: columna más oscura que sus vecinas de forma continua desde abajo hasta dentro del avión
   if (found && !obst) {
     const top = Math.round(y1 - 0.3 * (y1 - y0)), rows = H - 1 - top;
@@ -129,6 +138,7 @@ export async function analyse(blob) {
       if (k > 0.55 * rows) obst = 1;
     }
   }
+  if (bmp.close) bmp.close();
   // firma 16x12 normalizada para comparar si dos fotos muestran la misma escena
   const sc = document.createElement('canvas'); sc.width = 16; sc.height = 12; sc.getContext('2d').drawImage(c, 0, 0, 16, 12);
   const sd = sc.getContext('2d').getImageData(0, 0, 16, 12).data; const sig = new Float32Array(192);
@@ -153,19 +163,19 @@ export function pickBest(b) {
   const ok = b.frames.filter(f => !f.err);
   b.warn = '';
   if (!ok.length) return;
-  // Desenfocada: menos del 70 % de la nitidez de las tomas con el avión de tamaño parecido
+  // Menos nítida: menos del 45 % de la mejor toma con el avión casi del mismo tamaño (y al menos 3 tomas para comparar)
   ok.forEach(f => {
-    const peers = ok.filter(o => Math.abs(o.fill - f.fill) <= 0.35 * Math.max(o.fill, f.fill, 0.05));
+    const peers = ok.filter(o => Math.abs(o.fill - f.fill) <= 0.15 * Math.max(o.fill, f.fill, 0.05));
     const ref = Math.max(...peers.map(o => o.sharp)) || 1;
-    f.rel = f.sharp / ref; f.soft = peers.length > 1 && f.rel < 0.7;
+    f.rel = f.sharp / ref; f.soft = peers.length >= 3 && f.rel < 0.45;
   });
   ok.forEach(f => f.score = 50 * f.rel + 15 * Math.min(f.fill, 0.8) - 30 * f.touches - 25 * f.obst - 40 * f.soft);
-  const clean = ok.filter(f => !f.touches && !f.obst && !f.soft);
+  const clean = ok.filter(f => !f.touches && !f.obst);   // «menos nítida» solo baja la nota: nunca descarta
   const pool = clean.length ? clean : ok;
   const sorted = [...pool].sort((a, c) => c.score - a.score);
   const best = sorted[0];
   b.n = best.name;
-  if (!clean.length) b.warn = best.touches ? 'avión cortado en todas las tomas' : best.obst ? 'algo delante del avión en todas las tomas' : 'ninguna toma del todo nítida';
+  if (!clean.length) b.warn = best.touches ? 'avión cortado en todas las tomas' : 'algo delante del avión en todas las tomas';
   // X solo si aporta algo distinto (otro ángulo o fase); dos tomas casi iguales no necesitan segunda
   const alt = sorted.slice(1).filter(f => f.score >= best.score * 0.7 && sceneDiff(f.sig, best.sig) > 0.6)
     .sort((a, c) => sceneDiff(c.sig, best.sig) - sceneDiff(a.sig, best.sig))[0];
