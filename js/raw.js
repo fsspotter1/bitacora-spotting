@@ -110,10 +110,11 @@ export function pickBest(b) {
   ok.forEach(f => f.score = 70 * f.sharp / max - 18 * f.touches + 12 * Math.min(f.fill, 0.8));
   const sorted = [...ok].sort((a, c) => c.score - a.score);
   b.n = sorted[0].name;
-  const idx = f => b.frames.indexOf(f);
-  const alt = sorted.slice(1).filter(f => f.score >= sorted[0].score * 0.7)
-    .sort((a, c) => Math.abs(idx(c) - idx(sorted[0])) - Math.abs(idx(a) - idx(sorted[0])))[0];
-  b.x = alt ? alt.name : (sorted[1] ? sorted[1].name : '');
+  // X solo si aporta algo distinto (otro ángulo o fase); dos tomas casi iguales no necesitan segunda
+  const best = sorted[0];
+  const alt = sorted.slice(1).filter(f => f.score >= best.score * 0.7 && sceneDiff(f.sig, best.sig) > 0.6)
+    .sort((a, c) => sceneDiff(c.sig, best.sig) - sceneDiff(a.sig, best.sig))[0];
+  b.x = alt ? alt.name : '';
 }
 
 // 0 = idénticas; >0.6 suele ser otra escena
