@@ -1,5 +1,6 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff } from './raw.js';
+import { loadDetector } from './detect.js';
 
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_lXi2rPoZx8ofeM46jqwBlA_PaSQ2JSX'; // clave pública
@@ -160,7 +161,7 @@ $('#resetBtn').onclick = async () => {
 
 /* ---------------- registrar carpeta ---------------- */
 let bursts = [], folder = '';
-$('#pickBtn').onclick = () => $('#pick').click();
+$('#pickBtn').onclick = () => { loadDetector(); $('#pick').click(); };
 $('#pick').onchange = async ev => {
   const files = [...ev.target.files].filter(f => RAW_RE.test(f.name) && !f.name.startsWith('.'));
   ev.target.value = '';
@@ -184,7 +185,7 @@ $('#pick').onchange = async ev => {
   for (const b of bursts) {
     const queue = [...b.frames];
     await Promise.all([0, 1, 2].map(async () => { while (queue.length) { const f = queue.shift(); if (!f.err) { try { Object.assign(f, await analyse(f.blob)); } catch { f.err = true; } } done++; } }));
-    pickBest(b); renderBurst(b); prog(`Analizando ${done}/${total} · ráfaga ${b.id + 1}/${bursts.length}`);
+    pickBest(b); if (b.loose) b.on = false; renderBurst(b); prog(`Analizando ${done}/${total} · ráfaga ${b.id + 1}/${bursts.length}`);
   }
   markSimilar(); renderAll();
   $('#bar').style.width = '100%';
@@ -235,6 +236,7 @@ function renderBurst(b) {
     </div>
     <div class="meta">
       ${b.similar ? `<div class="similar"><span>Parece el mismo avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Unir con la anterior</button></div>` : ''}
+      ${b.loose && !b.on ? '<p class="warnline">Toma suelta: parece un disparo sin finalidad o el inicio de una ráfaga. No se guardará salvo que marques «Guardar».</p>' : b.warn ? `<p class="warnline">⚠ ${esc(b.warn)}: revisa la ráfaga.</p>` : ''}
       <div class="row"><span class="time">${hm(b.frames[0].t)}</span><span class="files">${esc(base(b.frames[0].name))} – ${esc(base(b.frames[k - 1].name))} · ${k} ${k === 1 ? 'foto' : 'fotos'}</span>
         ${b.id > 0 && !b.similar ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}</div>
       <div class="inputs">
@@ -243,7 +245,7 @@ function renderBurst(b) {
         <input type="text" data-k="op" placeholder="Operador" value="${esc(b.op)}" aria-label="Operador">
         <label class="field"><input type="checkbox" data-k="on" ${b.on ? 'checked' : ''}> Guardar</label>
       </div>
-      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : (f.touches ? '<span class="bad">cortado</span>' : '')}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
+      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : f.touches ? '<span class="bad">cortado</span>' : f.obst ? '<span class="bad">algo delante</span>' : f.soft ? '<span class="bad">desenfocada</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
       <p class="hint">Haz clic en una miniatura para verla en grande y elige si es la <b>principal (★ N)</b> o la <b>segunda (X)</b>.</p>
     </div>`;
   el.querySelectorAll('input[data-k]').forEach(i => i.oninput = i.onchange = () => {
@@ -264,7 +266,7 @@ $('#bursts').addEventListener('click', e => {
   else if (a.dataset.act === 'split') return splitAt(b.id, view);
   renderBurst(b);
 });
-function updateSave() { const n = bursts.filter(b => b.on && b.n).length; $('#saveStat').textContent = `${n} ráfagas se guardarán como pendientes en «${folder}»`; $('#saveBtn').disabled = !n; }
+function updateSave() { const n = bursts.filter(b => b.on && b.n).length, off = bursts.filter(b => !b.on).length; $('#saveStat').textContent = `${n} ráfagas se guardarán como pendientes en «${folder}»` + (off ? ` · ${off} desmarcadas` : ''); $('#saveBtn').disabled = !n; }
 $('#saveBtn').onclick = async () => {
   const todo = bursts.filter(b => b.on && b.n && !b.saved);
   const apt = $('#apt').value.trim().toUpperCase();
@@ -277,7 +279,7 @@ $('#saveBtn').onclick = async () => {
       const up = await sb.storage.from('thumbs').upload(thumb_path, nF.keepBlob, { contentType: 'image/jpeg' });
       if (up.error) thumb_path = null;
     }
-    const row = { fecha: ymd(b.frames[0].t), matricula: b.reg, tipo: b.type, operador: b.op, aeropuerto: apt, carpeta: folder, archivo: base(b.n), archivo2: b.x ? base(b.x) : '', pendiente: true, thumb_path };
+    const row = { fecha: ymd(b.frames[0].t), matricula: b.reg, tipo: b.type, operador: b.op, aeropuerto: apt, carpeta: folder, archivo: base(b.n), archivo2: b.x ? base(b.x) : '', nota: b.warn ? '⚠ Revisar: ' + b.warn : '', pendiente: true, thumb_path };
     const { data, error } = await sb.from('entries').insert(row).select().single();
     if (error) { fail++; continue; }
     b.saved = true; ok++; S.entries.unshift(data);
