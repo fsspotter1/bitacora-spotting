@@ -47,7 +47,7 @@ function instrucciones({ aeropuerto, fecha, nExtra }) {
     '- No inventes matrículas. Pon la matrícula completa solo si la lees entera o es inequívoca. Si solo lees una parte, déjala en matricula_parcial con "?" en los caracteres dudosos y matricula vacía.',
     '- Mira también la compuerta del tren delantero: muchas aerolíneas pintan ahí las últimas 2-3 letras (p. ej. "XI" → D-AIXI). Iberia no las lleva, pero pinta el nombre del avión en el morro.',
     '- Formato de matrícula: con guion cuando lo lleva (EC-MXV, D-AIXI, 9H-ABC); EE. UU. sin guion (N123AB). Militares y gobierno: el serial tal como está pintado (08-8200, A-1102, 330002), sin punto final.',
-    '- tipo_icao: el designador ICAO exacto de la variante si se distingue (A20N vs A320 por los motores y sharklets, B38M vs B738, A359 vs A35K, B77W vs B772…). Si dudas entre variantes, pon la más probable y dilo en motivo.',
+    '- tipo_icao: el designador ICAO exacto de la variante solo si se distingue claramente (cuenta ventanillas, motores, winglets…) (A20N vs A320 por los motores y sharklets, B38M vs B738, A359 vs A35K, B77W vs B772…). Si dudas entre variantes, pon la más probable y dilo en motivo.',
     '- operador: el nombre comercial habitual (Iberia, Air Europa, Lufthansa, easyJet, Ryanair, Qatar Airways…). Aviones privados o ejecutivos sin aerolínea: "Privado".',
     '- confianza "baja" si la foto es nocturna, de frente, de cola, el avión está lejos o tapado, o si la matrícula no se lee.',
     'Responde solo con el JSON pedido.',
@@ -81,18 +81,12 @@ async function conClaude(imagenes, texto, modelo) {
     content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
   });
   content.push({ type: 'text', text: texto });
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({
+  const j = await llamarClaude({
       model: modelo || 'claude-sonnet-5-5', max_tokens: 1500,
       // Salida estructurada: la respuesta sigue ESQUEMA (sustituye a la herramienta forzada, que los modelos nuevos no admiten)
       output_config: { format: { type: 'json_schema', schema: ESQUEMA } },
       messages: [{ role: 'user', content }],
-    }),
   });
-  const j = await r.json();
-  if (!r.ok) throw new Error(j?.error?.message || `Claude respondió ${r.status}`);
   const txt = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
   let o; try { o = JSON.parse(txt); } catch { throw new Error(j.stop_reason === 'max_tokens' ? 'respuesta cortada (max_tokens)' : 'La IA no devolvió una identificación'); }
   return { ...o, _uso: j.usage };
@@ -129,15 +123,23 @@ function textoVerificacion(reg, visto, fecha) {
   ].join('\n');
 }
 
+// Con saturación (429 límite de ritmo, 529 sobrecarga) espera y reintenta, en vez de rendirse a la primera
 async function llamarClaude(cuerpo) {
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify(cuerpo),
-  });
-  const j = await r.json();
-  if (!r.ok) { const e = new Error(j?.error?.message || `Claude respondió ${r.status}`); e.status = r.status; throw e; }
-  return j;
+  for (let intento = 0; ; intento++) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify(cuerpo),
+    });
+    const j = await r.json().catch(() => null);
+    if (r.ok) return j;
+    if ((r.status === 429 || r.status === 529 || r.status >= 500) && intento < 4) {
+      const espera = Math.min(20, +(r.headers.get('retry-after') || 0) || 3 * 2 ** intento) * 1000;
+      await new Promise(ok => setTimeout(ok, espera + Math.random() * 1000));
+      continue;
+    }
+    const e = new Error(j?.error?.message || `Claude respondió ${r.status}`); e.status = r.status; throw e;
+  }
 }
 
 async function verificarMatricula(reg, visto, fecha) {

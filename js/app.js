@@ -319,11 +319,12 @@ async function runAI(list, retry) {
   const queue = [...todo];
   todo.forEach(b => { AI.busy.add(b); b.aiErr = ''; refresh(b); });
   updateAIBar();
-  await Promise.all([0, 1, 2].map(async () => {
+  // allSettled + try/finally: aunque una ráfaga falle (o falle al pintarse), el resto sigue y el paso final se hace siempre
+  await Promise.allSettled([0, 1, 2].map(async () => {
     while (queue.length) {
       const b = queue.shift();
-      if (AI.stopped || !bursts.includes(b)) { AI.busy.delete(b); refresh(b); continue; }   // parada o ya unida con otra
       try {
+        if (AI.stopped || !bursts.includes(b)) continue;   // parada o ya unida con otra
         const { data } = await sb.auth.getSession();
         const token = data.session?.access_token;
         if (!token) { const e = new Error('Vuelve a entrar en la web para usar la IA.'); e.code = 'sin_sesion'; throw e; }
@@ -331,14 +332,22 @@ async function runAI(list, retry) {
       } catch (e) {
         if (['sin_clave', 'limite', 'sin_sesion'].includes(e.code)) AI.stopped = e.message;
         else b.aiErr = e.message || 'Error';
+      } finally {
+        AI.busy.delete(b);
+        try { refresh(b); updateAIBar(); } catch (e) { console.error(e); }
       }
-      AI.busy.delete(b); refresh(b); updateAIBar();
     }
   }));
-  const before = bursts.map(x => x.similar); markSimilar();
-  new Set([...markDups(), ...bursts.filter((x, i) => x.similar !== before[i])]).forEach(refresh);
-  renderStat(); updateSave(); updateAIBar();
-  // Al terminar todo, las ráfagas con la misma matrícula y día se juntan solas (se pueden volver a separar)
+  terminarRonda();
+}
+// Recalcula parecidas/repetidas y, si ya no queda nada identificándose, junta las del mismo avión
+function terminarRonda() {
+  try {
+    const before = bursts.map(x => x.similar); markSimilar();
+    new Set([...markDups(), ...bursts.filter((x, i) => x.similar !== before[i])]).forEach(refresh);
+    renderStat(); updateSave(); updateAIBar();
+  } catch (e) { console.error(e); }
+  // Al terminar todo, las ráfagas del mismo avión se juntan solas (se pueden volver a separar)
   if (!AI.busy.size) { const n = unirRepetidas(); if (n) toast(`${n} ${n === 1 ? 'ráfaga repetida unida' : 'ráfagas repetidas unidas'} con su avión`); }
 }
 function refresh(b) { if (bursts.includes(b)) renderBurst(b); }
@@ -384,8 +393,21 @@ function markDups() {
     const t0 = b.frames[0].t;
     const cand = bursts.filter(o => o !== b && claveReg(o.reg) && ymd(o.frames[0].t) === ymd(t0)
       && Math.abs(o.frames[0].t - t0) < 30 * 60 * 1000 && re.test(claveReg(o.reg)));
-    const target = cand.length === 1 ? (bursts.find(o => o.dupOf === undefined && claveReg(o.reg) === claveReg(cand[0].reg)) || cand[0]) : null;
+    const regs = [...new Set(cand.map(o => claveReg(o.reg)))];   // cuentan matrículas distintas, no ráfagas
+    const target = regs.length === 1 ? cand.find(o => o.dupOf === undefined) || cand[0] : null;
     if (target && b.dupOf !== target.id) { b.dupOf = target.id; changed.push(b); }
+  });
+  // Ráfaga sin matrícula (de frente, de cola…) entre dos del MISMO avión, pegadas en el tiempo y con el mismo tipo
+  // y operador: también es ese avión (p. ej. YV2792 rodando · de frente sin matrícula · YV2792 de cerca).
+  const avion = o => o ? (o.dupOf !== undefined ? bursts.find(x => x.id === o.dupOf) : claveReg(o.reg) ? o : null) : null;
+  bursts.forEach((b, i) => {
+    if (claveReg(b.reg) || b.dupOf !== undefined || b.ai?.matricula_parcial) return;
+    const p = avion(bursts[i - 1]), n = avion(bursts[i + 1]);
+    if (!p || !n || claveReg(p.reg) !== claveReg(n.reg)) return;
+    const pegada = (x, y) => Math.abs(x.frames[0].t - y.frames[y.frames.length - 1].t) < 10 * 60 * 1000;
+    const mismo = (k, v) => !v || !p[k] || claveReg(v) === claveReg(p[k]);
+    if (!pegada(b, bursts[i - 1]) || !pegada(bursts[i + 1], b) || !mismo('type', b.type) || !mismo('op', b.op)) return;
+    b.dupOf = p.id; changed.push(b);
   });
   return changed;
 }
@@ -401,7 +423,8 @@ function patronParcial(p) {
 function dupBanner(b) {
   if (b.dupOf === undefined) return '';
   const t = bursts.find(x => x.id === b.dupOf); if (!t) return '';
-  return `<div class="similar dup"><span>Misma matrícula que la ráfaga de las ${hhmm(t.frames[0].t)} (${esc(base(t.frames[0].name))}): es el mismo avión, seguramente en otra fase (rodando, despegando…).</span><button class="btn sm" data-act="mergedup">Unir con esa ráfaga</button></div>`;
+  const por = claveReg(b.reg) ? 'Misma matrícula que' : b.ai?.matricula_parcial ? `La matrícula parcial encaja con ${esc(t.reg)}, de` : `Sin matrícula, pero entre dos ráfagas de ${esc(t.reg)}, como`;
+  return `<div class="similar dup"><span>${por} la ráfaga de las ${hhmm(t.frames[0].t)} (${esc(base(t.frames[0].name))}): es el mismo avión, seguramente en otra fase (rodando, despegando…).</span><button class="btn sm" data-act="mergedup">Unir con esa ráfaga</button></div>`;
 }
 function otherBanner(b) {
   const f = b.ai?.otro_avion_en?.[0];
@@ -444,6 +467,7 @@ function notaDe(b) {
   if (r && r.hay_avion) {
     if (!r.matricula) rev.push(r.matricula_parcial ? 'matrícula parcial ' + r.matricula_parcial : 'matrícula no legible');
     if (r.confianza === 'baja') rev.push('IA con confianza baja');
+    if (r.matricula && r.verificado !== true) rev.push('tipo sin verificar con la ficha de la matrícula');
     if (r.otro_avion_en?.length) rev.push('puede haber otro avión en la ráfaga');
     if (r.para && r.para !== b.n) rev.push('la IA miró otra foto de la ráfaga');
     if (b.touched.reg && r.matricula && claveReg(r.matricula) !== claveReg(b.reg)) rev.push('la IA leyó ' + r.matricula);

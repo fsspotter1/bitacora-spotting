@@ -79,7 +79,8 @@ function aplicarFicha(v, ver, deMemoria) {
   const s = x => String(x ?? '').trim();
   const dominio = ver.origen || (() => { try { return new URL(s(ver.fuente)).hostname.replace(/^www\./, ''); } catch { return ''; } })();
   const memo = deMemoria && ver.origen !== 'tu bitácora' ? ' (ya buscada)' : '';
-  if (!ver.encontrado) return { ...v, verificado: false, motivo: (v.motivo + ' · Matrícula sin ficha en internet' + memo + '.').slice(0, 300) };
+  if (!ver.encontrado) return { ...v, verificado: false, confianza: v.confianza === 'alta' ? 'media' : v.confianza,
+    motivo: (`⚠ Tipo según la foto: ${v.matricula} no tiene ficha en internet${memo}. ` + v.motivo).slice(0, 300) };
   if (ver.coincide_con_foto === false) {
     return { ...v, verificado: false, confianza: 'baja', fuente: s(ver.fuente),
       motivo: (`⚠ La ficha de ${v.matricula} dice ${s(ver.modelo)}, que no cuadra con la foto: revisa la matrícula. ` + v.motivo).slice(0, 300) };
@@ -113,10 +114,15 @@ export async function identificar(b, { token, aeropuerto, fecha }) {
   j.para = b.n;   // foto con la que se identificó
   // Ficha de la matrícula: de tu bitácora, de una búsqueda anterior de esta sesión o, si es nueva, de internet
   if (j.hay_avion && /^[A-Z0-9-]{3,10}$/.test(j.matricula || '')) {
+    let fallo = 'no respondió';
     try {
       const { p, nueva } = pedirFicha(j.matricula, j, { token, fecha });
-      return aplicarFicha(j, await p, !nueva);
-    } catch { /* sin ficha: se queda lo visto en la foto */ }
+      const ver = await p;
+      if (ver) return aplicarFicha(j, ver, !nueva);
+    } catch (e) { fallo = e.message || fallo; }
+    // Nunca dar por bueno el tipo supuesto en silencio: se marca para revisar y «Volver a identificar» lo reintenta
+    return { ...j, verificado: false, sin_verificar: true, confianza: j.confianza === 'alta' ? 'media' : j.confianza,
+      motivo: (`⚠ Tipo sin verificar (la consulta de la ficha ${fallo}); pulsa «Volver a identificar». ` + j.motivo).slice(0, 300) };
   }
   return j;
 }
