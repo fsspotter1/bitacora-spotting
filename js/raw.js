@@ -43,7 +43,15 @@ function scanJpegs(buf) {
 
 export async function readFrame(file) {
   const ext = file.name.split('.').pop().toLowerCase();
-  if (ext === 'jpg' || ext === 'jpeg') return { blob: file, date: null };
+  if (ext === 'jpg' || ext === 'jpeg') {
+    // hora de captura del bloque EXIF (APP1) del JPEG
+    let date = null;
+    try {
+      const a = new Uint8Array(await file.slice(0, 1 << 17).arrayBuffer());
+      for (let i = 2; i < a.length - 10; i++) if (a[i] === 0x45 && a[i + 1] === 0x78 && a[i + 2] === 0x69 && a[i + 3] === 0x66 && a[i + 4] === 0 && a[i + 5] === 0) { date = parseTiff(a.slice(i + 6).buffer).date; break; }
+    } catch { /* sin EXIF */ }
+    return { blob: file, date };
+  }
   const head = await file.slice(0, 1 << 20).arrayBuffer();
   if (ext === 'raf') { const dv = new DataView(head); const jo = dv.getUint32(84), jl = dv.getUint32(88); return { blob: file.slice(jo, jo + jl, 'image/jpeg'), date: null }; }
   const t = parseTiff(head);
@@ -147,6 +155,7 @@ export async function analyse(blob) {
   for (let i = 0; i < 192; i++) sig[i] = (sig[i] - mu) / sdv;
   return {
     sig, obst, found, emb,
+    box: [x0 / W, y0 / H, x1 / W, y1 / H],   // dónde está el avión (0–1), para el recorte de la IA
     sharp: n ? (s2 / n - (s / n) ** 2) : 0,
     touches,
     fill: (x1 - x0) / W,

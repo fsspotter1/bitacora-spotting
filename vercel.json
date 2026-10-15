@@ -1,0 +1,5 @@
+{
+  "functions": {
+    "api/identificar.js": { "maxDuration": 60 }
+  }
+}
