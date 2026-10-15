@@ -28,11 +28,12 @@ const ESQUEMA = {
     varios_aviones: { type: 'boolean', description: 'true si en la foto principal hay otro avión que compite como sujeto' },
     otras_tomas: {
       type: 'array', description: 'Para cada toma adicional (en el orden recibido), si muestra el mismo avión que la principal',
-      items: { type: 'object', properties: { i: { type: 'integer' }, mismo_avion: { type: 'boolean' } }, required: ['i', 'mismo_avion'] },
+      items: { type: 'object', properties: { i: { type: 'integer' }, mismo_avion: { type: 'boolean' } }, required: ['i', 'mismo_avion'], additionalProperties: false },
     },
     motivo: { type: 'string', description: 'Explicación breve en español (máx. 20 palabras): qué se lee y qué dudas hay' },
   },
   required: ['hay_avion', 'matricula', 'matricula_parcial', 'donde_se_lee', 'tipo_icao', 'operador', 'librea', 'confianza', 'varios_aviones', 'otras_tomas', 'motivo'],
+  additionalProperties: false,
 };
 
 function instrucciones({ aeropuerto, fecha, nExtra }) {
@@ -49,7 +50,7 @@ function instrucciones({ aeropuerto, fecha, nExtra }) {
     '- tipo_icao: el designador ICAO exacto de la variante si se distingue (A20N vs A320 por los motores y sharklets, B38M vs B738, A359 vs A35K, B77W vs B772…). Si dudas entre variantes, pon la más probable y dilo en motivo.',
     '- operador: el nombre comercial habitual (Iberia, Air Europa, Lufthansa, easyJet, Ryanair, Qatar Airways…). Aviones privados o ejecutivos sin aerolínea: "Privado".',
     '- confianza "baja" si la foto es nocturna, de frente, de cola, el avión está lejos o tapado, o si la matrícula no se lee.',
-    'Responde solo con la herramienta.',
+    'Responde solo con el JSON pedido.',
   ].filter(Boolean).join('\n');
 }
 
@@ -84,17 +85,17 @@ async function conClaude(imagenes, texto, modelo) {
     method: 'POST',
     headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: modelo || 'claude-sonnet-5-5', max_tokens: 800,
-      tools: [{ name: 'identificacion', description: 'Devuelve la identificación del avión', input_schema: ESQUEMA }],
-      tool_choice: { type: 'tool', name: 'identificacion' },
+      model: modelo || 'claude-sonnet-5-5', max_tokens: 1500,
+      // Salida estructurada: la respuesta sigue ESQUEMA (sustituye a la herramienta forzada, que los modelos nuevos no admiten)
+      output_config: { format: { type: 'json_schema', schema: ESQUEMA } },
       messages: [{ role: 'user', content }],
     }),
   });
   const j = await r.json();
   if (!r.ok) throw new Error(j?.error?.message || `Claude respondió ${r.status}`);
-  const t = (j.content || []).find(c => c.type === 'tool_use');
-  if (!t) throw new Error('La IA no devolvió una identificación');
-  return { ...t.input, _uso: j.usage };
+  const txt = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+  let o; try { o = JSON.parse(txt); } catch { throw new Error(j.stop_reason === 'max_tokens' ? 'respuesta cortada (max_tokens)' : 'La IA no devolvió una identificación'); }
+  return { ...o, _uso: j.usage };
 }
 
 async function conGemini(imagenes, texto, modelo) {
@@ -104,7 +105,7 @@ async function conGemini(imagenes, texto, modelo) {
     parts.push({ text: i === 0 ? 'Imagen 1 (foto entera):' : i === 1 ? 'Imagen 2 (recorte del avión):' : `Imagen ${i + 1} (toma adicional, índice ${i - 2}):` });
     parts.push({ inline_data: { mime_type: 'image/jpeg', data: b64 } });
   });
-  parts.push({ text: texto.replace('Responde solo con la herramienta.', 'Responde solo con el JSON pedido.') });
+  parts.push({ text: texto.replace('Responde solo con el JSON pedido.', 'Responde solo con el JSON pedido.') });
   const schema = JSON.parse(JSON.stringify(ESQUEMA), (k, v) => (k === 'additionalProperties' ? undefined : v));
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`, {
     method: 'POST',
