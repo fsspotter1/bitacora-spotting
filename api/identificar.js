@@ -261,7 +261,11 @@ module.exports = async function handler(req, res) {
   const imgs = Array.isArray(body?.imagenes) ? body.imagenes.filter(x => typeof x === 'string') : [];
   if (imgs.length < 2 || imgs.length > 6 || imgs.some(x => x.length > MAX_IMG)) return res.status(400).json({ error: 'imagenes', mensaje: 'Faltan imágenes o son demasiado grandes.' });
 
-  const limite = +process.env.AI_LIMITE_DIA || 400;
+  // Límite diario por usuario (protege el saldo frente a los beta testers). AI_LIMITE_DIA=0 lo quita para todos;
+  // AI_SIN_LIMITE = correos separados por comas que no tienen límite (p. ej. el administrador haciendo pruebas).
+  const sinLimite = String(process.env.AI_SIN_LIMITE || '').toLowerCase().split(',').map(x => x.trim()).filter(Boolean);
+  const limiteEnv = process.env.AI_LIMITE_DIA;
+  const limite = (limiteEnv === '0' || sinLimite.includes(String(u.email || '').toLowerCase())) ? Infinity : (+limiteEnv || 400);
   const uso = await controlarUso(token, limite);
   if (!uso.ok) return res.status(429).json({ error: 'limite', mensaje: `Has llegado al límite de ${limite} identificaciones por hoy. Mañana se renueva.` });
 

@@ -20,7 +20,7 @@ no se suben los originales, solo una miniatura (~30 KB) de la foto elegida de ca
 1. Supabase → SQL Editor → pegar `supabase/v0.2.sql` → Run.
 2. Crear una clave en console.anthropic.com (API Keys) con saldo cargado.
 3. Vercel → proyecto → Settings → Environment Variables → `ANTHROPIC_API_KEY` = la clave → Save → Deployments → Redeploy.
-   Opcionales: `AI_MODEL` (por defecto `claude-sonnet-5-5`), `AI_LIMITE_DIA` (por defecto 400 ráfagas por usuario y día),
+   Opcionales: `AI_MODEL` (por defecto `claude-sonnet-5-5`), `AI_LIMITE_DIA` (por defecto 400 ráfagas por usuario y día; `0` = sin límite), `AI_SIN_LIMITE` (correos sin límite, separados por comas),
    `GEMINI_API_KEY` + `AI_PROVIDER=gemini` para probar Gemini.
 Sin clave, la web funciona igual que la v0.1 (registro a mano).
 

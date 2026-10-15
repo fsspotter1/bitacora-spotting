@@ -376,7 +376,27 @@ function markDups() {
     if (key && !first.has(key)) first.set(key, b);
     if (prev !== b.dupOf) changed.push(b);
   });
+  // Ráfagas sin matrícula completa pero con parte legible (p. ej. «…3027» desde atrás o «YV30?7»): si encaja con
+  // UNA sola ráfaga del mismo día con matrícula, a menos de 30 min, es el mismo avión.
+  bursts.forEach(b => {
+    if (claveReg(b.reg) || b.dupOf !== undefined) return;
+    const re = patronParcial(b.ai?.matricula_parcial); if (!re) return;
+    const t0 = b.frames[0].t;
+    const cand = bursts.filter(o => o !== b && claveReg(o.reg) && ymd(o.frames[0].t) === ymd(t0)
+      && Math.abs(o.frames[0].t - t0) < 30 * 60 * 1000 && re.test(claveReg(o.reg)));
+    const target = cand.length === 1 ? (bursts.find(o => o.dupOf === undefined && claveReg(o.reg) === claveReg(cand[0].reg)) || cand[0]) : null;
+    if (target && b.dupOf !== target.id) { b.dupOf = target.id; changed.push(b); }
+  });
   return changed;
+}
+// «…XI» → termina en XI · «D-AI?I» → D,A,I,cualquiera,I · «YV30» → contiene YV30 (mínimo 3 caracteres legibles)
+function patronParcial(p) {
+  const raw = String(p || '').toUpperCase().trim(); if (!raw) return null;
+  const suf = /^(…|\.\.\.)/.test(raw);
+  const core = raw.replace(/^(…|\.\.\.)/, '').replace(/[^A-Z0-9?]/g, '');
+  if (core.replace(/\?/g, '').length < 3) return null;
+  const body = core.replace(/\?/g, '[A-Z0-9]');
+  return new RegExp(suf ? body + '$' : core.includes('?') ? '^' + body + '$' : body);
 }
 function dupBanner(b) {
   if (b.dupOf === undefined) return '';
