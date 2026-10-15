@@ -243,6 +243,21 @@ module.exports = async function handler(req, res) {
 
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = null; } }
+
+  // Modo ficha: la web ya tiene la matrícula leída y solo pide sus datos en internet (una vez por matrícula y sesión).
+  if (body?.ficha) {
+    const f = body.ficha, reg = String(f.matricula || '').toUpperCase().replace(/\s+/g, '');
+    if (!/^[A-Z0-9-]{3,10}$/.test(reg)) return res.status(400).json({ error: 'matricula', mensaje: 'Matrícula no válida.' });
+    if (proveedor !== 'anthropic' && !process.env.ANTHROPIC_API_KEY) return res.status(200).json({ ver: null });
+    if (process.env.AI_VERIFICAR === '0') return res.status(200).json({ ver: null });
+    const visto = { tipo_icao: String(f.tipo_icao || '').slice(0, 8), operador: String(f.operador || '').slice(0, 60), motivo: String(f.motivo || '').slice(0, 300) };
+    const ver = await verificarMatricula(reg, visto, String(body.fecha || '').slice(0, 10));
+    if (!ver) return res.status(200).json({ ver: null });
+    const s = x => String(x ?? '').trim().slice(0, 200);
+    return res.status(200).json({ ver: { encontrado: !!ver.encontrado, coincide_con_foto: ver.coincide_con_foto !== false, modelo: s(ver.modelo),
+      tipo_icao: s(ver.tipo_icao).toUpperCase().replace(/\s+/g, ''), operador: s(ver.operador), fuente: s(ver.fuente), nota: s(ver.nota) } });
+  }
+
   const imgs = Array.isArray(body?.imagenes) ? body.imagenes.filter(x => typeof x === 'string') : [];
   if (imgs.length < 2 || imgs.length > 6 || imgs.some(x => x.length > MAX_IMG)) return res.status(400).json({ error: 'imagenes', mensaje: 'Faltan imágenes o son demasiado grandes.' });
 
@@ -255,8 +270,8 @@ module.exports = async function handler(req, res) {
   try {
     const crudo = proveedor === 'gemini' ? await conGemini(imgs, texto, process.env.AI_MODEL) : await conClaude(imgs, texto, process.env.AI_MODEL);
     let v = limpiar(crudo, nExtra);
-    // Verificación en internet (solo con Claude y con matrícula completa). AI_VERIFICAR=0 la desactiva.
-    if (process.env.ANTHROPIC_API_KEY && process.env.AI_VERIFICAR !== '0' && v.hay_avion && /^[A-Z0-9-]{3,10}$/.test(v.matricula)) {
+    // Verificación en línea solo para clientes antiguos; la web actual manda verificar:false y pide la ficha aparte.
+    if (body.verificar !== false && process.env.ANTHROPIC_API_KEY && process.env.AI_VERIFICAR !== '0' && v.hay_avion && /^[A-Z0-9-]{3,10}$/.test(v.matricula)) {
       v = aplicarVerificacion(v, await verificarMatricula(v.matricula, v, String(body.fecha || '').slice(0, 10)));
     }
     return res.status(200).json({ ...v, proveedor, usado_hoy: uso.usado, limite });

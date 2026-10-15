@@ -1,7 +1,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff, splitByAircraft } from './raw.js';
 import { loadDetector, loadEmbedder } from './detect.js';
-import { identificar, claveReg } from './ia.js';
+import { identificar, claveReg, fichasDeBitacora } from './ia.js';
 
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_lXi2rPoZx8ofeM46jqwBlA_PaSQ2JSX'; // clave pública
@@ -65,7 +65,7 @@ async function loadEntries() {
     if (error) { $('#logStat').textContent = 'No se pudo cargar la bitácora: ' + error.message; return; }
     all.push(...data); if (data.length < 1000) break; from += 1000;
   }
-  S.entries = all; renderLog(); loadThumbs();
+  S.entries = all; fichasDeBitacora(all); renderLog(); loadThumbs();
 }
 async function loadThumbs() {
   const need = S.entries.filter(e => e.thumb_path && !S.thumbs.has(e.thumb_path)).map(e => e.thumb_path);
@@ -338,6 +338,8 @@ async function runAI(list, retry) {
   const before = bursts.map(x => x.similar); markSimilar();
   new Set([...markDups(), ...bursts.filter((x, i) => x.similar !== before[i])]).forEach(refresh);
   renderStat(); updateSave(); updateAIBar();
+  // Al terminar todo, las ráfagas con la misma matrícula y día se juntan solas (se pueden volver a separar)
+  if (!AI.busy.size) { const n = unirRepetidas(); if (n) toast(`${n} ${n === 1 ? 'ráfaga repetida unida' : 'ráfagas repetidas unidas'} con su avión`); }
 }
 function refresh(b) { if (bursts.includes(b)) renderBurst(b); }
 function renderStat() {
@@ -404,14 +406,18 @@ function updateAIBar() {
   $('#aiBar').hidden = false;
 }
 $('#aiRunBtn').onclick = () => runAI(null, true);
-$('#dupBtn').onclick = () => {
+// Une todas las ráfagas que repiten matrícula el mismo día con la primera de ese avión
+function unirRepetidas() {
+  let n = 0;
   for (let guard = 0; guard < 2000; guard++) {
     const b = [...bursts].reverse().find(x => x.dupOf !== undefined); if (!b) break;
     const t = bursts.find(x => x.id === b.dupOf); if (!t) break;
-    mergeBursts(t.id, b.id, true);
+    mergeBursts(t.id, b.id, true); n++;
   }
-  renderAll(); updateSave(); updateAIBar(); toast('Ráfagas del mismo avión unidas');
-};
+  if (n) { renderAll(); updateSave(); updateAIBar(); }
+  return n;
+}
+$('#dupBtn').onclick = () => { if (unirRepetidas()) toast('Ráfagas del mismo avión unidas'); };
 function notaDe(b) {
   const r = b.ai, rev = [];
   if (b.warn) rev.push(b.warn);

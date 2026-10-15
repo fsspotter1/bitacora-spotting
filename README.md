@@ -29,4 +29,8 @@ JetPhotos, airport-data y Planespotters (solo esas webs) y corrige tipo ICAO y o
 solo los tokens leídos. Opcionales: `AI_MODEL_VERIF` (por defecto `claude-haiku-5-5`; si no admite la herramienta se usa
 `AI_MODEL`) y `AI_VERIFICAR=0` para desactivarla.
 
+**Ahorro (v0.2.2):** cada matrícula se busca una sola vez por sesión (las ráfagas del mismo avión esperan a la misma
+búsqueda) y las matrículas ya revisadas en tu bitácora no se buscan. Al terminar, las ráfagas con la misma matrícula
+y día se unen solas.
+
 Navegadores: Chrome, Edge, Firefox o Safari recientes en ordenador.
