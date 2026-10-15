@@ -24,4 +24,9 @@ no se suben los originales, solo una miniatura (~30 KB) de la foto elegida de ca
    `GEMINI_API_KEY` + `AI_PROVIDER=gemini` para probar Gemini.
 Sin clave, la web funciona igual que la v0.1 (registro a mano).
 
+**Verificación de matrícula (v0.2.1):** cuando la IA lee una matrícula completa, el servidor abre sus fichas en
+JetPhotos, airport-data y Planespotters (solo esas webs) y corrige tipo ICAO y operador. Sin cargo extra por consulta,
+solo los tokens leídos. Opcionales: `AI_MODEL_VERIF` (por defecto `claude-haiku-5-5`; si no admite la herramienta se usa
+`AI_MODEL`) y `AI_VERIFICAR=0` para desactivarla.
+
 Navegadores: Chrome, Edge, Firefox o Safari recientes en ordenador.

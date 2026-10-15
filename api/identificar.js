@@ -98,6 +98,101 @@ async function conClaude(imagenes, texto, modelo) {
   return { ...o, _uso: j.usage };
 }
 
+// ---------- v0.2.1 · verificación de la matrícula en internet ----------
+// Con la matrícula leída en la foto, Claude abre las fichas de esa matrícula en JetPhotos, airport-data y
+// Planespotters (solo esas webs) y corrige tipo y operador. No hay cargo extra por consulta: solo los tokens leídos.
+const WEBS_VERIF = ['jetphotos.com', 'www.jetphotos.com', 'airport-data.com', 'www.airport-data.com', 'planespotters.net', 'www.planespotters.net'];
+
+function urlsMatricula(reg) {
+  const r = encodeURIComponent(reg);
+  return [
+    `https://www.jetphotos.com/registration/${r}`,
+    `https://www.airport-data.com/aircraft/${r}.html`,
+    `https://www.planespotters.net/search?q=${r}`,
+  ];
+}
+
+function textoVerificacion(reg, visto, fecha) {
+  return [
+    `Eres un spotter experto. En una foto${fecha ? ` del ${fecha}` : ''} se ha leído la matrícula ${reg}.`,
+    `Lo que se ve en la foto (puede estar mal en el tipo exacto): tipo ${visto.tipo_icao || '?'}, operador ${visto.operador || '?'}. Descripción: ${visto.motivo || '—'}`,
+    'Consulta estas fichas de la matrícula (ábrelas con web_fetch; si una falla, sigue con las demás):',
+    ...urlsMatricula(reg).map(u => '- ' + u),
+    'Con lo que digan las fichas, devuelve SOLO un objeto JSON (sin texto antes ni después) con estos campos:',
+    '{"encontrado": bool, "modelo": "fabricante y modelo exactos según la ficha, p. ej. Beechcraft B200GT King Air 250",',
+    ' "tipo_icao": "designador ICAO de ese modelo (p. ej. BE20, B350, LJ35, LJ45, SW2, PAY2, C25B, A20N, B738)",',
+    ' "operador": "operador en la fecha de la foto (o el más cercano); \\"Privado\\" si es privado; vacío si no consta",',
+    ' "coincide_con_foto": bool (false si la ficha describe un avión claramente distinto del de la foto: otra familia, otro número de motores…),',
+    ' "fuente": "URL de la ficha más útil", "nota": "máx. 15 palabras en español"}',
+    'Reglas: usa solo lo que pone en las fichas; no inventes. Si ninguna ficha tiene datos de esta matrícula, encontrado=false y el resto vacío.',
+    'Ojo: una matrícula puede haberse reutilizado en otro avión con los años; elige el que estuviera registrado en la fecha de la foto.',
+  ].join('\n');
+}
+
+async function llamarClaude(cuerpo) {
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify(cuerpo),
+  });
+  const j = await r.json();
+  if (!r.ok) { const e = new Error(j?.error?.message || `Claude respondió ${r.status}`); e.status = r.status; throw e; }
+  return j;
+}
+
+async function verificarMatricula(reg, visto, fecha) {
+  const modelos = [...new Set([process.env.AI_MODEL_VERIF || 'claude-haiku-5-5', process.env.AI_MODEL || 'claude-sonnet-5-5'])];
+  let ultimoError;
+  for (const model of modelos) {   // si el modelo barato no admite la herramienta, se prueba con el principal
+    try {
+      const messages = [{ role: 'user', content: textoVerificacion(reg, visto, fecha) }];
+      let j;
+      for (let vuelta = 0; vuelta < 4; vuelta++) {
+        j = await llamarClaude({
+          model, max_tokens: 1200, messages,
+          tools: [{ type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 3, allowed_domains: WEBS_VERIF, max_content_tokens: 6000 }],
+        });
+        if (j.stop_reason !== 'pause_turn') break;
+        messages.push({ role: 'assistant', content: j.content });   // turno largo: se continúa tal cual
+      }
+      const txt = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+      const m = txt.match(/\{[\s\S]*\}/);
+      if (!m) return null;
+      const o = JSON.parse(m[0]);
+      return { ...o, _uso: j.usage, _modelo: model };
+    } catch (e) {
+      ultimoError = e;
+      if (e.status !== 400) break;   // solo se reintenta con otro modelo si la petición no era válida para este
+    }
+  }
+  console.error('verificar:', ultimoError);
+  return null;
+}
+
+// Mezcla lo visto en la foto con lo que dicen las fichas
+function aplicarVerificacion(v, ver) {
+  if (!ver) return v;
+  const s = x => String(x ?? '').trim();
+  const dominio = (() => { try { return new URL(s(ver.fuente)).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+  if (!ver.encontrado) return { ...v, verificado: false, motivo: (v.motivo + ' · Matrícula sin ficha en internet.').slice(0, 300) };
+  if (ver.coincide_con_foto === false) {
+    return { ...v, verificado: false, confianza: 'baja', fuente: s(ver.fuente),
+      motivo: (`⚠ La ficha de ${v.matricula} dice ${s(ver.modelo)}, que no cuadra con la foto: revisa la matrícula. ` + v.motivo).slice(0, 300) };
+  }
+  const tipo = s(ver.tipo_icao).toUpperCase().replace(/\s+/g, '');
+  const cambio = tipo && tipo !== v.tipo_icao ? ` (la IA había dicho ${v.tipo_icao || '?'})` : '';
+  return {
+    ...v,
+    tipo_icao: tipo || v.tipo_icao,
+    operador: s(ver.operador) || v.operador,
+    modelo: s(ver.modelo),
+    verificado: true,
+    fuente: s(ver.fuente),
+    confianza: v.confianza === 'baja' ? 'media' : 'alta',
+    motivo: (`✓ ${s(ver.modelo) || tipo}${cambio}, según ${dominio || 'internet'}. ` + (s(ver.nota) ? s(ver.nota) + ' ' : '') + '· ' + v.motivo).slice(0, 300),
+  };
+}
+
 async function conGemini(imagenes, texto, modelo) {
   const m = modelo || 'gemini-2.5-flash';
   const parts = [];
@@ -159,7 +254,12 @@ module.exports = async function handler(req, res) {
   const texto = instrucciones({ aeropuerto: String(body.aeropuerto || '').slice(0, 4).toUpperCase(), fecha: String(body.fecha || '').slice(0, 10), nExtra });
   try {
     const crudo = proveedor === 'gemini' ? await conGemini(imgs, texto, process.env.AI_MODEL) : await conClaude(imgs, texto, process.env.AI_MODEL);
-    return res.status(200).json({ ...limpiar(crudo, nExtra), proveedor, usado_hoy: uso.usado, limite });
+    let v = limpiar(crudo, nExtra);
+    // Verificación en internet (solo con Claude y con matrícula completa). AI_VERIFICAR=0 la desactiva.
+    if (process.env.ANTHROPIC_API_KEY && process.env.AI_VERIFICAR !== '0' && v.hay_avion && /^[A-Z0-9-]{3,10}$/.test(v.matricula)) {
+      v = aplicarVerificacion(v, await verificarMatricula(v.matricula, v, String(body.fecha || '').slice(0, 10)));
+    }
+    return res.status(200).json({ ...v, proveedor, usado_hoy: uso.usado, limite });
   } catch (e) {
     console.error('identificar:', e);
     return res.status(502).json({ error: 'ia', mensaje: 'La IA no respondió: ' + String(e.message || e).slice(0, 200) });
