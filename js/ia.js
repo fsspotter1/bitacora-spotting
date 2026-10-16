@@ -100,12 +100,12 @@ function aplicarFicha(v, ver, deMemoria) {
   };
 }
 
-export async function identificar(b, { token, aeropuerto, fecha }) {
+export async function identificar(b, { token, aeropuerto, fecha, comparar }) {
   const { imagenes, extras } = await prepararImagenes(b);
   const r = await fetch('/api/identificar', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ imagenes, aeropuerto, fecha, verificar: false }),
+    body: JSON.stringify({ imagenes, aeropuerto, fecha, verificar: false, comparar: !!comparar }),
   });
   let j = null; try { j = await r.json(); } catch { /* respuesta vacía */ }
   if (!r.ok) { const e = new Error(j?.mensaje || `Error ${r.status}`); e.code = j?.error || String(r.status); throw e; }

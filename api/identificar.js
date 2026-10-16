@@ -1,4 +1,4 @@
-// Identificación de aviones con IA (v0.2).
+// Identificación de aviones con IA (v0.3).
 // La web manda la foto elegida de una ráfaga (entera + recorte grande del avión) y, si la ráfaga es larga,
 // unas tomas pequeñas más para comprobar que todo es el mismo avión. Devuelve matrícula, tipo y operador
 // sugeridos, con el nivel de confianza. Las claves de la IA viven solo aquí (variables de entorno de Vercel).
@@ -7,7 +7,10 @@
 //   ANTHROPIC_API_KEY   clave de la API de Claude (proveedor por defecto)
 //   GEMINI_API_KEY      alternativa (Google Gemini), por si se quiere probar otro proveedor
 //   AI_PROVIDER         "anthropic" o "gemini" (opcional; por defecto, el que tenga clave)
-//   AI_MODEL            modelo (opcional; por defecto claude-sonnet-5-5 / gemini-2.5-flash)
+//   AI_MODEL_LECTURA    modelo que lee la foto (opcional; por defecto claude-haiku-5-5, el barato)
+//   AI_MODEL_REVISION   modelo que repasa las lecturas dudosas (opcional; por defecto claude-sonnet-5-5;
+//                       AI_MODEL, si existe, hace lo mismo por compatibilidad). AI_REVISION=0 la desactiva.
+//   (Gemini: AI_MODEL, por defecto gemini-2.5-flash)
 //   AI_LIMITE_DIA       ráfagas por usuario y día (opcional; por defecto 400)
 
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
@@ -72,6 +75,43 @@ async function controlarUso(token, limite) {
     await fetch(`${SUPABASE_URL}/rest/v1/ai_uso`, { method: 'POST', headers: { ...h, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: '{}' });
     return { ok: true, usado: total + 1 };
   } catch { return { ok: true, usado: null }; }
+}
+
+const MODELO_LECTURA = () => process.env.AI_MODEL_LECTURA || 'claude-haiku-5-5';
+const MODELO_REVISION = () => process.env.AI_MODEL_REVISION || process.env.AI_MODEL || 'claude-sonnet-5-5';
+const corto = m => /haiku/i.test(m) ? 'Haiku' : /sonnet/i.test(m) ? 'Sonnet' : /opus/i.test(m) ? 'Opus' : m;
+
+// Lectura dudosa = se repasa con el modelo grande: no ve avión, confianza no alta o solo parte de la matrícula
+const dudosa = o => !o || o.hay_avion === false || o.confianza !== 'alta' || (!String(o.matricula || '').trim() && !!String(o.matricula_parcial || '').trim());
+
+// Lee la foto con el modelo barato y, si la lectura es dudosa (o el modelo falla), la repite con el grande.
+async function leerConClaude(imagenes, texto) {
+  const barato = MODELO_LECTURA(), grande = MODELO_REVISION();
+  let o = null, fallo = null;
+  try { o = await conClaude(imagenes, texto, barato); } catch (e) { fallo = e; }
+  if (barato === grande || process.env.AI_REVISION === '0') {
+    if (!o) throw fallo;
+    return { ...o, _modelo: corto(barato), _revisado: false };
+  }
+  if (o && !dudosa(o)) return { ...o, _modelo: corto(barato), _revisado: false };
+  try {
+    const r = await conClaude(imagenes, texto, grande);
+    return { ...r, _modelo: corto(grande), _revisado: true, _motivo_revision: o ? 'lectura dudosa' : 'falló ' + corto(barato) };
+  } catch (e) {
+    if (o) return { ...o, _modelo: corto(barato), _revisado: false };   // sin revisión posible: mejor la lectura barata que nada
+    throw e;
+  }
+}
+
+// Modo prueba: los dos modelos leen la misma foto; se devuelve la lectura del grande y la comparación
+async function compararModelos(imagenes, texto) {
+  const barato = MODELO_LECTURA(), grande = MODELO_REVISION();
+  const [a, b] = await Promise.allSettled([conClaude(imagenes, texto, barato), conClaude(imagenes, texto, grande)]);
+  if (b.status !== 'fulfilled') throw b.reason;
+  const resumen = x => x.status === 'fulfilled'
+    ? { matricula: String(x.value.matricula || ''), matricula_parcial: String(x.value.matricula_parcial || ''), tipo_icao: String(x.value.tipo_icao || ''), operador: String(x.value.operador || ''), confianza: String(x.value.confianza || ''), hay_avion: x.value.hay_avion !== false, revisaria: dudosa(x.value) }
+    : { error: String(x.reason?.message || x.reason).slice(0, 120) };
+  return { ...b.value, _modelo: corto(grande), _revisado: false, _comparacion: { [corto(barato).toLowerCase()]: resumen(a), [corto(grande).toLowerCase()]: resumen(b), barato: corto(barato), grande: corto(grande) } };
 }
 
 async function conClaude(imagenes, texto, modelo) {
@@ -274,8 +314,11 @@ module.exports = async function handler(req, res) {
   const nExtra = imgs.length - 2;
   const texto = instrucciones({ aeropuerto: String(body.aeropuerto || '').slice(0, 4).toUpperCase(), fecha: String(body.fecha || '').slice(0, 10), nExtra });
   try {
-    const crudo = proveedor === 'gemini' ? await conGemini(imgs, texto, process.env.AI_MODEL) : await conClaude(imgs, texto, process.env.AI_MODEL);
-    let v = limpiar(crudo, nExtra);
+    const crudo = proveedor === 'gemini' ? await conGemini(imgs, texto, process.env.AI_MODEL)
+      : body.comparar === true ? await compararModelos(imgs, texto)
+      : await leerConClaude(imgs, texto);
+    let v = { ...limpiar(crudo, nExtra), modelo: crudo._modelo || 'Gemini', revisado: !!crudo._revisado };
+    if (crudo._comparacion) v.comparacion = crudo._comparacion;
     // Verificación en línea solo para clientes antiguos; la web actual manda verificar:false y pide la ficha aparte.
     if (body.verificar !== false && process.env.ANTHROPIC_API_KEY && process.env.AI_VERIFICAR !== '0' && v.hay_avion && /^[A-Z0-9-]{3,10}$/.test(v.matricula)) {
       v = aplicarVerificacion(v, await verificarMatricula(v.matricula, v, String(body.fecha || '').slice(0, 10)));

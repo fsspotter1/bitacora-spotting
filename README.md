@@ -20,7 +20,8 @@ no se suben los originales, solo una miniatura (~30 KB) de la foto elegida de ca
 1. Supabase → SQL Editor → pegar `supabase/v0.2.sql` → Run.
 2. Crear una clave en console.anthropic.com (API Keys) con saldo cargado.
 3. Vercel → proyecto → Settings → Environment Variables → `ANTHROPIC_API_KEY` = la clave → Save → Deployments → Redeploy.
-   Opcionales: `AI_MODEL` (por defecto `claude-sonnet-5-5`), `AI_LIMITE_DIA` (por defecto 400 ráfagas por usuario y día; `0` = sin límite), `AI_SIN_LIMITE` (correos sin límite, separados por comas),
+   Opcionales: `AI_MODEL_LECTURA` (lee la foto; por defecto `claude-haiku-5-5`), `AI_MODEL_REVISION` (repasa las lecturas
+   dudosas; por defecto `claude-sonnet-5-5`; `AI_REVISION=0` la desactiva), `AI_LIMITE_DIA` (por defecto 400 ráfagas por usuario y día; `0` = sin límite), `AI_SIN_LIMITE` (correos sin límite, separados por comas),
    `GEMINI_API_KEY` + `AI_PROVIDER=gemini` para probar Gemini.
 Sin clave, la web funciona igual que la v0.1 (registro a mano).
 
@@ -34,3 +35,11 @@ búsqueda) y las matrículas ya revisadas en tu bitácora no se buscan. Al termi
 y día se unen solas.
 
 Navegadores: Chrome, Edge, Firefox o Safari recientes en ordenador.
+
+**Prueba Haiku vs Sonnet:** abre la web con `?comparar` al final de la dirección. Cada ráfaga se lee con los dos
+modelos, la barra de IA cuenta en cuántas coinciden las matrículas y «Ver diferencias» salta a las que no.
+Cuesta unas 20 veces más por ráfaga: úsalo solo con una carpeta de prueba.
+
+**Unión por avión (v0.3):** al terminar la identificación se juntan en una sola entrada todas las ráfagas del mismo
+avión de la carpeta (misma matrícula, matrícula parcial que encaja con una sola, o sin matrícula pero con un único
+avión compatible cerca), y se eligen la principal y la segunda entre todas sus fotos.

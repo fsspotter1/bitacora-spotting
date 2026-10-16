@@ -185,9 +185,12 @@ export function pickBest(b) {
   const best = sorted[0];
   b.n = best.name;
   if (!clean.length) b.warn = best.touches ? 'avión cortado en todas las tomas' : 'algo delante del avión en todas las tomas';
-  // X solo si aporta algo distinto (otro ángulo o fase); dos tomas casi iguales no necesitan segunda
-  const alt = sorted.slice(1).filter(f => f.score >= best.score * 0.7 && sceneDiff(f.sig, best.sig) > 0.6)
-    .sort((a, c) => sceneDiff(c.sig, best.sig) - sceneDiff(a.sig, best.sig))[0];
+  // X = la mejor de las demás que aporte algo distinto: otro ángulo (escena distinta) u otro momento (más de 20 s
+  // después o antes, p. ej. rodando y luego despegando). Con todas las ráfagas del avión unidas casi siempre la hay;
+  // dos tomas casi iguales seguidas no necesitan segunda.
+  const minimo = best.score > 0 ? best.score * 0.7 : best.score - 10;
+  const distinta = f => sceneDiff(f.sig, best.sig) > 0.45 || Math.abs(f.t - best.t) > 20 * 1000;
+  const alt = sorted.slice(1).find(f => f.score >= minimo && distinta(f));   // sorted va de mejor a peor
   b.x = alt ? alt.name : '';
   // Toma suelta (1–2 fotos sin ninguna limpia, o con el avión diminuto): casi siempre un disparo
   // sin finalidad o el arranque de la ráfaga; se desmarca para no guardarla salvo que el usuario quiera
