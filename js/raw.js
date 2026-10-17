@@ -73,8 +73,51 @@ export function captureTime(exifDate, file) {
 
 const toBlob = (c, q) => new Promise(r => c.toBlob(r, 'image/jpeg', q));
 
+// ¿El avión cruza de verdad el borde `side` ('l','r','t','b')? La caja del detector solo dice que está CERCA
+// (se pasa o se queda corta un 2-3 %), así que se mira la tira de píxeles del borde a la altura del avión:
+// si hay un tramo seguido que no es fondo (comparado con el resto de ese borde), el avión sale del encuadre.
+// Estelas de humo, marcas de agua o el morro rozando el borde dejan tramos de pocos píxeles y no cuentan.
+const BORDE = 3;   // píxeles de profundidad de la tira
+function colorBorde(px, W, H, side, k) {
+  const v = side === 'l' || side === 'r'; let r = 0, g = 0, b = 0;
+  for (let d = 0; d < BORDE; d++) {
+    const x = v ? (side === 'l' ? d : W - 1 - d) : k, y = v ? k : (side === 't' ? d : H - 1 - d), i = (y * W + x) * 4;
+    r += px[i]; g += px[i + 1]; b += px[i + 2];
+  }
+  return [r / BORDE, g / BORDE, b / BORDE];
+}
+function mediana(a) { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y), h = s.length >> 1; return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2; }
+function cruzaBorde(px, W, H, side, lo, hi) {
+  const L = side === 'l' || side === 'r' ? H : W;
+  const prof = Array.from({ length: L }, (_, k) => colorBorde(px, W, H, side, k));
+  lo = Math.max(0, Math.floor(lo)); hi = Math.min(L, Math.ceil(hi));
+  const pad = Math.round(0.03 * L), a = Math.max(0, lo - pad), b = Math.min(L, hi + pad);
+  let ref = [...prof.slice(0, a), ...prof.slice(b)];
+  if (ref.length < 0.15 * L) {   // el avión ocupa casi todo ese lado: el fondo se toma de los cuatro bordes
+    ref = [];
+    for (const s of ['l', 'r', 't', 'b']) { const n = s === 'l' || s === 'r' ? H : W; for (let k = 0; k < n; k += 2) ref.push(colorBorde(px, W, H, s, k)); }
+  }
+  const med = [0, 1, 2].map(c => mediana(ref.map(p => p[c])));
+  const dist = p => Math.hypot(p[0] - med[0], p[1] - med[1], p[2] - med[2]);
+  const dr = ref.map(dist), m = mediana(dr), mad = mediana(dr.map(v => Math.abs(v - m)));
+  const thr = Math.max(35, m + 4 * mad);
+  let run = 0, best = 0;
+  for (let k = lo; k < hi; k++) { run = dist(prof[k]) > thr ? run + 1 : 0; if (run > best) best = run; }
+  return best >= Math.max(6, 0.02 * L);
+}
+
+// Lados en los que el avión sale del encuadre: candidatos = caja a menos del 8 % del borde; se confirma con píxeles
+function ladosCortados(px, W, H, bx0, by0, bx1, by1) {
+  const mg = 0.08; let n = 0;
+  if (bx0 < mg && cruzaBorde(px, W, H, 'l', by0 * H, by1 * H)) n++;
+  if (bx1 > 1 - mg && cruzaBorde(px, W, H, 'r', by0 * H, by1 * H)) n++;
+  if (by0 < mg && cruzaBorde(px, W, H, 't', bx0 * W, bx1 * W)) n++;
+  if (by1 > 1 - mg && cruzaBorde(px, W, H, 'b', bx0 * W, bx1 * W)) n++;
+  return n;
+}
+
 // Analiza una toma: dónde está el avión (detector; si no carga, bordes), nitidez dentro de él,
-// si toca el borde del encuadre (cortado) y si algo se cruza por delante (poste, valla, persona,
+// si sale del encuadre (cortado: caja cerca del borde y confirmado con los píxeles del borde) y si algo se cruza por delante (poste, valla, persona,
 // vehículo u otro avión más cerca). Devuelve miniaturas.
 export async function analyse(blob) {
   const bmp = await createImageBitmap(blob);
@@ -91,7 +134,7 @@ export async function analyse(blob) {
     if (planes.length) {
       found = true; const [bx0, by0, bx1, by1] = planes[0].box;
       x0 = Math.round(bx0 * W); x1 = Math.round(bx1 * W); y0 = Math.round(by0 * H); y1 = Math.round(by1 * H);
-      const mg = 0.015; touches = (bx0 < mg) + (bx1 > 1 - mg) + (by0 < mg) + (by1 > 1 - mg);
+      touches = ladosCortados(px, W, H, bx0, by0, bx1, by1);
       // personas, vehículos u otro avión más cerca (más abajo en la foto) encima del avión
       const area = (bx1 - bx0) * (by1 - by0);
       for (const d of dets) {
@@ -109,7 +152,7 @@ export async function analyse(blob) {
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) if (grad[y * W + x] > thr) { colS[x]++; rowS[y]++; }
     const span = a => { let t = 0; for (const v of a) t += v; let s = 0, lo = 0, hi = a.length - 1; for (let i = 0; i < a.length; i++) { s += a[i]; if (s >= t * 0.03) { lo = i; break; } } s = 0; for (let i = a.length - 1; i >= 0; i--) { s += a[i]; if (s >= t * 0.03) { hi = i; break; } } return [lo, hi]; };
     [x0, x1] = span(colS); [y0, y1] = span(rowS);
-    const m = 0.012; touches = (x0 <= W * m) + (x1 >= W * (1 - m)) + (y0 <= H * m) + (y1 >= H * (1 - m));
+    touches = ladosCortados(px, W, H, x0 / W, y0 / H, x1 / W, y1 / H);
   }
   // huella del avión (para separar aviones distintos dentro de una misma ráfaga)
   let emb = null;

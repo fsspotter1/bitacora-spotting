@@ -360,7 +360,8 @@ function renderStat() {
 function applyAI(b, r) {
   b.ai = r;
   if (!r.hay_avion) { if (!b.touched.on) b.on = false; return; }
-  const reg = r.matricula ? r.matricula + (r.librea ? `(${r.librea})` : '') : '';
+  const extra = [r.codigo, r.librea].filter(Boolean).join(' · ');
+  const reg = r.matricula ? r.matricula + (extra ? `(${extra})` : '') : '';
   if (!b.touched.reg && reg) b.reg = reg;
   if (!b.touched.type && r.tipo_icao) b.type = r.tipo_icao;
   if (!b.touched.op && r.operador) b.op = r.operador;
@@ -373,7 +374,7 @@ function aiLine(b) {
   const r = b.ai;
   if (!r) return b.n ? `<p class="ailine">Sin identificar <button class="btn sm ghost" data-act="ai">Identificar con IA</button></p>` : '';
   if (!r.hay_avion) return `<p class="ailine err">La IA no ve ningún avión en la foto principal${b.on ? '' : ', así que no se guardará'}. <button class="btn sm ghost" data-act="ai">Volver a identificar</button></p>`;
-  const what = r.matricula || (r.matricula_parcial ? `parcial ${r.matricula_parcial}` : 'matrícula no legible');
+  const what = (r.matricula || (r.matricula_parcial ? `parcial ${r.matricula_parcial}` : r.codigo ? 'serial no legible' : 'matrícula no legible')) + (r.codigo ? ` · código ${r.codigo}` : '');
   const stale = r.para && r.para !== b.n ? ' · <i>identificada con otra foto</i>' : '';
   const quien = r.modelo ? ` · ${esc(r.modelo)}${r.revisado ? ' (revisada)' : ''}` : '';
   return `<p class="ailine"><span class="conf ${r.confianza}">IA · ${r.confianza}${quien}</span><b>${esc(what)}</b><span>${esc([r.tipo_icao, r.operador, r.librea].filter(Boolean).join(' · '))}</span><span>— ${esc(r.motivo)}${stale}</span><button class="btn sm ghost" data-act="ai">Volver a identificar</button></p>${cmpLine(r)}`;
@@ -511,7 +512,7 @@ function notaDe(b) {
   const r = b.ai, rev = [];
   if (b.warn) rev.push(b.warn);
   if (r && r.hay_avion) {
-    if (!r.matricula) rev.push(r.matricula_parcial ? 'matrícula parcial ' + r.matricula_parcial : 'matrícula no legible');
+    if (!r.matricula) rev.push(r.matricula_parcial ? 'matrícula parcial ' + r.matricula_parcial : r.codigo ? 'serial no legible (código ' + r.codigo + ')' : 'matrícula no legible');
     if (r.confianza === 'baja') rev.push('IA con confianza baja');
     if (r.matricula && r.verificado !== true) rev.push('tipo sin verificar con la ficha de la matrícula');
     if (r.otro_avion_en?.length) rev.push('puede haber otro avión en la ráfaga');

@@ -21,7 +21,8 @@ const ESQUEMA = {
   type: 'object',
   properties: {
     hay_avion: { type: 'boolean', description: 'false si en la foto no hay ningún avión o helicóptero reconocible' },
-    matricula: { type: 'string', description: 'Matrícula o serial completo SOLO si se lee entero sin dudas; si no, cadena vacía' },
+    matricula: { type: 'string', description: 'Matrícula civil o serial militar oficial completo SOLO si se lee entero sin dudas; nunca el código de unidad; si no, cadena vacía' },
+    codigo: { type: 'string', description: 'Solo militares: código o indicativo de unidad pintado en grande (p. ej. 15-30 en el morro de un F-18 español, 31-21, 4-12, 118-AT); vacío si no hay' },
     matricula_parcial: { type: 'string', description: 'Los caracteres que sí se leen, p. ej. "D-AI?I" o "…XI" de la compuerta del tren; vacío si no se lee nada' },
     donde_se_lee: { type: 'string', description: 'fuselaje, cola, compuerta del tren delantero, ala, motor, nombre en el morro… o "no se lee"' },
     tipo_icao: { type: 'string', description: 'Designador ICAO del tipo (A20N, B738, B77W, A359, E195, C17…), vacío si no se puede saber' },
@@ -35,7 +36,7 @@ const ESQUEMA = {
     },
     motivo: { type: 'string', description: 'Explicación breve en español (máx. 20 palabras): qué se lee y qué dudas hay' },
   },
-  required: ['hay_avion', 'matricula', 'matricula_parcial', 'donde_se_lee', 'tipo_icao', 'operador', 'librea', 'confianza', 'varios_aviones', 'otras_tomas', 'motivo'],
+  required: ['hay_avion', 'matricula', 'matricula_parcial', 'donde_se_lee', 'codigo', 'tipo_icao', 'operador', 'librea', 'confianza', 'varios_aviones', 'otras_tomas', 'motivo'],
   additionalProperties: false,
 };
 
@@ -49,7 +50,8 @@ function instrucciones({ aeropuerto, fecha, nExtra }) {
     'Reglas:',
     '- No inventes matrículas. Pon la matrícula completa solo si la lees entera o es inequívoca. Si solo lees una parte, déjala en matricula_parcial con "?" en los caracteres dudosos y matricula vacía.',
     '- Mira también la compuerta del tren delantero: muchas aerolíneas pintan ahí las últimas 2-3 letras (p. ej. "XI" → D-AIXI). Iberia no las lleva, pero pinta el nombre del avión en el morro.',
-    '- Formato de matrícula: con guion cuando lo lleva (EC-MXV, D-AIXI, 9H-ABC); EE. UU. sin guion (N123AB). Militares y gobierno: el serial tal como está pintado (08-8200, A-1102, 330002), sin punto final.',
+    '- Formato de matrícula: con guion cuando lo lleva (EC-MXV, D-AIXI, 9H-ABC); EE. UU. sin guion (N123AB). Militares y gobierno: el serial oficial tal como está pintado (08-8200, A-1102, 330002, C.15-72, T.22-1), sin punto final.',
+    '- Militares: NO confundas el serial con el código de unidad. El número grande del morro o la deriva suele ser el código de unidad (España: 15-30, 12-50, 31-21 = ala/escuadrón + número; Italia: 4-12; Francia: 118-AT) y va en "codigo". El serial oficial suele ir pequeño en la deriva o el fuselaje trasero (España: C.15-72, T.21-03; Italia: MM7062; Francia: el número de construcción). Si el serial no se lee, matricula vacía y confianza baja, aunque el código se lea perfectamente.',
     '- tipo_icao: el designador ICAO exacto de la variante solo si se distingue claramente (cuenta ventanillas, motores, winglets…) (A20N vs A320 por los motores y sharklets, B38M vs B738, A359 vs A35K, B77W vs B772…). Si dudas entre variantes, pon la más probable y dilo en motivo.',
     '- operador: el nombre comercial habitual (Iberia, Air Europa, Lufthansa, easyJet, Ryanair, Qatar Airways…). Aviones privados o ejecutivos sin aerolínea: "Privado".',
     '- confianza "baja" si la foto es nocturna, de frente, de cola, el avión está lejos o tapado, o si la matrícula no se lee.',
@@ -82,7 +84,8 @@ const MODELO_REVISION = () => process.env.AI_MODEL_REVISION || process.env.AI_MO
 const corto = m => /haiku/i.test(m) ? 'Haiku' : /sonnet/i.test(m) ? 'Sonnet' : /opus/i.test(m) ? 'Opus' : m;
 
 // Lectura dudosa = se repasa con el modelo grande: no ve avión, confianza no alta o solo parte de la matrícula
-const dudosa = o => !o || o.hay_avion === false || o.confianza !== 'alta' || (!String(o.matricula || '').trim() && !!String(o.matricula_parcial || '').trim());
+const dudosa = o => !o || o.hay_avion === false || o.confianza !== 'alta' || (!String(o.matricula || '').trim() && !!String(o.matricula_parcial || '').trim())
+  || (!!String(o.codigo || '').trim() && String(o.codigo).trim().toUpperCase() === String(o.matricula || '').trim().toUpperCase());
 
 // Lee la foto con el modelo barato y, si la lectura es dudosa (o el modelo falla), la repite con el grande.
 async function leerConClaude(imagenes, texto) {
@@ -257,12 +260,14 @@ async function conGemini(imagenes, texto, modelo) {
 
 function limpiar(o, nExtra) {
   const s = v => String(v ?? '').trim();
-  const reg = s(o.matricula).toUpperCase().replace(/\s+/g, '').replace(/\.$/, '');
+  let reg = s(o.matricula).toUpperCase().replace(/\s+/g, '').replace(/\.$/, '');
+  if (reg && reg === s(o.codigo).toUpperCase().replace(/\s+/g, '')) reg = '';   // el código de unidad no es la matrícula
   return {
     hay_avion: o.hay_avion !== false,
     matricula: reg,
     matricula_parcial: s(o.matricula_parcial).toUpperCase(),
     donde_se_lee: s(o.donde_se_lee),
+    codigo: s(o.codigo).toUpperCase(),
     tipo_icao: s(o.tipo_icao).toUpperCase().replace(/\s+/g, ''),
     operador: s(o.operador),
     librea: s(o.librea),
@@ -289,7 +294,7 @@ module.exports = async function handler(req, res) {
   // Modo ficha: la web ya tiene la matrícula leída y solo pide sus datos en internet (una vez por matrícula y sesión).
   if (body?.ficha) {
     const f = body.ficha, reg = String(f.matricula || '').toUpperCase().replace(/\s+/g, '');
-    if (!/^[A-Z0-9-]{3,10}$/.test(reg)) return res.status(400).json({ error: 'matricula', mensaje: 'Matrícula no válida.' });
+    if (!/^[A-Z0-9.-]{3,12}$/.test(reg)) return res.status(400).json({ error: 'matricula', mensaje: 'Matrícula no válida.' });
     if (proveedor !== 'anthropic' && !process.env.ANTHROPIC_API_KEY) return res.status(200).json({ ver: null });
     if (process.env.AI_VERIFICAR === '0') return res.status(200).json({ ver: null });
     const visto = { tipo_icao: String(f.tipo_icao || '').slice(0, 8), operador: String(f.operador || '').slice(0, 60), motivo: String(f.motivo || '').slice(0, 300) };
@@ -320,7 +325,7 @@ module.exports = async function handler(req, res) {
     let v = { ...limpiar(crudo, nExtra), modelo: crudo._modelo || 'Gemini', revisado: !!crudo._revisado };
     if (crudo._comparacion) v.comparacion = crudo._comparacion;
     // Verificación en línea solo para clientes antiguos; la web actual manda verificar:false y pide la ficha aparte.
-    if (body.verificar !== false && process.env.ANTHROPIC_API_KEY && process.env.AI_VERIFICAR !== '0' && v.hay_avion && /^[A-Z0-9-]{3,10}$/.test(v.matricula)) {
+    if (body.verificar !== false && process.env.ANTHROPIC_API_KEY && process.env.AI_VERIFICAR !== '0' && v.hay_avion && /^[A-Z0-9.-]{3,12}$/.test(v.matricula)) {
       v = aplicarVerificacion(v, await verificarMatricula(v.matricula, v, String(body.fecha || '').slice(0, 10)));
     }
     return res.status(200).json({ ...v, proveedor, usado_hoy: uso.usado, limite });

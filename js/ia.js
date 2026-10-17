@@ -113,7 +113,7 @@ export async function identificar(b, { token, aeropuerto, fecha, comparar }) {
   j.otro_avion_en = (j.otras_tomas || []).filter(t => !t.mismo_avion).map(t => extras[t.i]).filter(Boolean);
   j.para = b.n;   // foto con la que se identificó
   // Ficha de la matrícula: de tu bitácora, de una búsqueda anterior de esta sesión o, si es nueva, de internet
-  if (j.hay_avion && /^[A-Z0-9-]{3,10}$/.test(j.matricula || '')) {
+  if (j.hay_avion && /^[A-Z0-9.-]{3,12}$/.test(j.matricula || '')) {
     let fallo = 'no respondió';
     try {
       const { p, nueva } = pedirFicha(j.matricula, j, { token, fecha });
