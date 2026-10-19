@@ -271,7 +271,7 @@ function renderBurst(b) {
         <label class="field"><input type="checkbox" data-k="on" ${b.on ? 'checked' : ''}> Guardar</label>
       </div>
       ${aiLine(b)}
-      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : f.touches ? '<span class="bad">cortado</span>' : f.obst ? '<span class="bad">algo delante</span>' : f.soft ? '<span class="bad soft">¿menos nítida?</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
+      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : f.cortadoIA ? '<span class="bad">cortado</span>' : f.obst ? '<span class="bad">algo delante</span>' : f.touches && !f.enteroIA ? '<span class="bad soft" title="Puede que el avión se salga del encuadre; la IA lo comprueba en la principal">¿cortado?</span>' : f.soft ? '<span class="bad soft">¿menos nítida?</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
       <p class="hint">Haz clic en la foto grande para verla a pantalla completa, y en una miniatura para verla en grande y elige si es la <b>principal (★ N)</b> o la <b>segunda (X)</b>.</p>
     </div>`;
   el.querySelectorAll('input[data-k]').forEach(i => {
@@ -380,32 +380,29 @@ function applyAI(b, r) {
   if (!b.touched.type && r.tipo_icao) b.type = r.tipo_icao;
   if (!b.touched.op && r.operador) b.op = r.operador;
 }
-// «Cortado» lo calcula la web mirando los bordes, y a veces confunde con el avión unas nubes, edificios o el
-// degradado del cielo junto al borde. La IA ve la foto de verdad, así que su respuesta manda en las tomas que mira
-// (principal y adicionales). Además, una toma marcada como cortada cuyo avión no está más pegado a ese borde que en
-// otra que la IA ve entera, también está entera.
+// «¿Cortado?» lo calcula la web mirando los bordes y solo es una sospecha. La IA ve la foto de verdad y su respuesta
+// manda en las tomas que mira (principal y adicionales). Una toma con sospecha cuyo avión no está más pegado a ese
+// borde que en otra que la IA ve entera, también está entera. Si la IA ve cortada la principal, se elige otra.
 const LADO = { l: 0, t: 1, r: 2, b: 3 };
 function aplicarEntero(b, r) {
   const v = r?.entero || {}; let cambio = false;
-  const limpiar = f => { f.ladosBordes = f.lados; f.touches = 0; f.lados = ''; f.enteroIA = true; cambio = true; };
   for (const f of b.frames) {
     if (!(f.name in v)) continue;
-    if (v[f.name] && f.touches) limpiar(f);
-    else if (v[f.name]) f.enteroIA = true;
-    else if (!v[f.name] && !f.touches) { f.touches = 1; f.cortadoIA = true; cambio = true; }
+    if (v[f.name] && !f.enteroIA) { f.enteroIA = true; f.cortadoIA = false; cambio = true; }
+    else if (!v[f.name] && !f.cortadoIA) { f.cortadoIA = true; f.enteroIA = false; cambio = true; }
   }
   const enteras = b.frames.filter(f => f.enteroIA && f.box);
   for (const f of b.frames) {
-    if (!f.touches || f.cortadoIA || !f.box || !f.lados) continue;
+    if (!f.touches || f.enteroIA || f.cortadoIA || !f.box || !f.lados) continue;
     const igualQueEntera = [...f.lados].every(l => enteras.some(o => {
       const i = LADO[l]; return l === 'l' || l === 't' ? f.box[i] >= o.box[i] - 0.01 : f.box[i] <= o.box[i] + 0.01;
     }));
-    if (igualQueEntera) limpiar(f);
+    if (igualQueEntera) { f.enteroIA = true; cambio = true; }
   }
   if (!cambio) return;
   const n = b.n, x = b.x; pickBest(b);
   const pn = b.frames.find(f => f.name === n);
-  if (pn && !pn.touches && !pn.obst) { b.n = n; b.x = x; }   // la principal elegida sigue valiendo: no se cambia
+  if (pn && !pn.cortadoIA && !pn.obst) { b.n = n; b.x = x; }   // la principal elegida sigue valiendo: no se cambia
 }
 const byAI = (b, k) => (b.ai && !b.touched?.[k] && b[k] ? ' byai' : '');
 function aiLine(b) {

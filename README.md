@@ -51,3 +51,6 @@ avión compatible cerca), y se eligen la principal y la segunda entre todas sus 
 - *Matrículas*: a la IA se le manda también el recorte de la segunda foto a resolución completa, y tras unir las
   ráfagas del mismo avión, si no se leyó la matrícula entera, se vuelve a leer una vez con la principal y la segunda
   nuevas.
+- *Cortado (19/10)*: lo que calcula la web mirando los bordes ya solo es una sospecha («¿cortado?»), que resta un
+  poco de nota pero nunca descarta una foto. Solo descarta «cortado» cuando lo confirma la IA; si la IA ve cortada la
+  principal, se elige otra.
