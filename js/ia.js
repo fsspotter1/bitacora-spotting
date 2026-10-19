@@ -29,6 +29,33 @@ function recorteAvion(bmp, box) {
   return lienzo(bmp, x0 * W, y0 * H, Math.max(16, (x1 - x0) * W), Math.max(16, (y1 - y0) * H), 1568);
 }
 
+// Hoja de contactos con las tomas de la ráfaga en las que la web sospecha que el avión se sale del encuadre: la IA
+// dice en cuáles falta de verdad un trozo del avión (acercarse al borde no cuenta). Una sola imagen extra.
+async function hojaContactos(tomas) {
+  if (!tomas.length) return null;
+  const cols = tomas.length <= 2 ? 2 : tomas.length <= 9 ? 3 : 4, G = 16, ETQ = 34, ANCHO = 1560;
+  const tw = Math.floor((ANCHO - (cols + 1) * G) / cols);
+  const bmps = [];
+  for (const f of tomas) {
+    try { bmps.push(await createImageBitmap(await (await fetch(f.large)).blob())); } catch { bmps.push(null); }
+  }
+  const th = Math.round(tw * Math.max(...bmps.map(m => m ? m.height / m.width : 2 / 3)));
+  const filas = Math.ceil(tomas.length / cols);
+  const c = document.createElement('canvas'); c.width = ANCHO; c.height = G + filas * (ETQ + th + G);
+  const g = c.getContext('2d'); g.fillStyle = '#1b1b1b'; g.fillRect(0, 0, c.width, c.height);
+  g.font = 'bold 26px sans-serif'; g.textBaseline = 'top';
+  bmps.forEach((m, k) => {
+    const x = G + (k % cols) * (tw + G), y = G + Math.floor(k / cols) * (ETQ + th + G);
+    g.fillStyle = '#fff'; g.fillText(String(k + 1), x, y);
+    if (!m) return;
+    const h = Math.round(tw * m.height / m.width);
+    g.drawImage(m, x, y + ETQ, tw, h);
+    g.strokeStyle = '#9a9a9a'; g.lineWidth = 4; g.strokeRect(x - 3, y + ETQ - 3, tw + 6, h + 6);   // el marco es el borde de la foto
+    if (m.close) m.close();
+  });
+  return { b64: await toB64(await toJpeg(c, 0.8)), nombres: tomas.map(f => f.name) };
+}
+
 export async function prepararImagenes(b) {
   const nF = b.frames.find(f => f.name === b.n);
   if (!nF?.blob) throw new Error('sin foto principal');
@@ -54,7 +81,14 @@ export async function prepararImagenes(b) {
     imagenes.push(await toB64(await toJpeg(lienzo(e, 0, 0, e.width, e.height, 448), 0.75)));
     if (e.close) e.close();
   }
-  return { imagenes, nRecortes, extras: extras.map(f => f.name), segunda: xF ? xF.name : '' };
+  // tomas con sospecha de «cortado» que la IA aún no ha visto (ni la principal ni las adicionales): hasta 12, las mejores
+  const vistas = new Set([b.n, ...extras.map(f => f.name)]);
+  const sospechosas = b.frames.filter(f => !f.err && f.large && f.touches > 0 && !f.enteroIA && !f.cortadoIA && !vistas.has(f.name))
+    .sort((p, q) => (q.score || 0) - (p.score || 0)).slice(0, 12).sort((p, q) => p.t - q.t);
+  let hoja = null;
+  try { hoja = await hojaContactos(sospechosas); } catch { hoja = null; }
+  if (hoja) imagenes.push(hoja.b64);
+  return { imagenes, nRecortes, nHoja: hoja ? hoja.nombres.length : 0, hoja: hoja ? hoja.nombres : [], extras: extras.map(f => f.name), segunda: xF ? xF.name : '' };
 }
 
 // ---------- Fichas por matrícula (v0.2.2) ----------
@@ -116,11 +150,11 @@ function aplicarFicha(v, ver, deMemoria) {
 }
 
 export async function identificar(b, { token, aeropuerto, fecha, comparar }) {
-  const { imagenes, nRecortes, extras, segunda } = await prepararImagenes(b);
+  const { imagenes, nRecortes, nHoja, hoja, extras, segunda } = await prepararImagenes(b);
   const r = await fetch('/api/identificar', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ imagenes, nRecortes, aeropuerto, fecha, verificar: false, comparar: !!comparar }),
+    body: JSON.stringify({ imagenes, nRecortes, nHoja, aeropuerto, fecha, verificar: false, comparar: !!comparar }),
   });
   let j = null; try { j = await r.json(); } catch { /* respuesta vacía */ }
   if (!r.ok) { const e = new Error(j?.mensaje || `Error ${r.status}`); e.code = j?.error || String(r.status); throw e; }
@@ -132,6 +166,7 @@ export async function identificar(b, { token, aeropuerto, fecha, comparar }) {
   j.entero = {};
   if (typeof j.avion_entero === 'boolean') j.entero[b.n] = j.avion_entero;
   (j.otras_tomas || []).forEach(t => { if (typeof t.entero === 'boolean' && t.mismo_avion && extras[t.i]) j.entero[extras[t.i]] = t.entero; });
+  (j.hoja || []).forEach(t => { if (hoja[t.n - 1]) j.entero[hoja[t.n - 1]] = t.entero; });
   // Ficha de la matrícula: de tu bitácora, de una búsqueda anterior de esta sesión o, si es nueva, de internet
   if (j.hay_avion && /^[A-Z0-9.-]{3,12}$/.test(j.matricula || '')) {
     let fallo = 'no respondió';

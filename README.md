@@ -54,3 +54,5 @@ avión compatible cerca), y se eligen la principal y la segunda entre todas sus 
 - *Cortado (19/10)*: lo que calcula la web mirando los bordes ya solo es una sospecha («¿cortado?»), que resta un
   poco de nota pero nunca descarta una foto. Solo descarta «cortado» cuando lo confirma la IA; si la IA ve cortada la
   principal, se elige otra.
+- *Hoja de contactos*: las tomas con sospecha de «¿cortado?» van en una sola imagen numerada y la IA dice en cuáles
+  queda una parte del avión fuera del borde (acercarse o rozar el borde no cuenta).
