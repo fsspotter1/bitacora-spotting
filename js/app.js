@@ -1,5 +1,5 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
-import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff, splitByAircraft } from './raw.js';
+import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff, splitByAircraft, DETECTAR_CORTES } from './raw.js';
 import { loadDetector, loadEmbedder } from './detect.js';
 import { identificar, claveReg, fichasDeBitacora } from './ia.js';
 
@@ -271,7 +271,7 @@ function renderBurst(b) {
         <label class="field"><input type="checkbox" data-k="on" ${b.on ? 'checked' : ''}> Guardar</label>
       </div>
       ${aiLine(b)}
-      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : f.cortadoIA ? '<span class="bad">cortado</span>' : f.obst ? '<span class="bad">algo delante</span>' : f.touches && !f.enteroIA ? '<span class="bad soft" title="Puede que el avión se salga del encuadre; la IA lo comprueba en la principal">¿cortado?</span>' : f.soft ? '<span class="bad soft">¿menos nítida?</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
+      <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : DETECTAR_CORTES && f.cortadoIA ? '<span class="bad">cortado</span>' : DETECTAR_CORTES && f.obst ? '<span class="bad">algo delante</span>' : DETECTAR_CORTES && f.touches && !f.enteroIA ? '<span class="bad soft" title="Puede que el avión se salga del encuadre; la IA lo comprueba en la principal">¿cortado?</span>' : f.soft ? '<span class="bad soft">¿menos nítida?</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
       <p class="hint">Haz clic en la foto grande para verla a pantalla completa, y en una miniatura para verla en grande y elige si es la <b>principal (★ N)</b> o la <b>segunda (X)</b>.</p>
     </div>`;
   el.querySelectorAll('input[data-k]').forEach(i => {
@@ -385,6 +385,7 @@ function applyAI(b, r) {
 // borde que en otra que la IA ve entera, también está entera. Si la IA ve cortada la principal, se elige otra.
 const LADO = { l: 0, t: 1, r: 2, b: 3 };
 function aplicarEntero(b, r) {
+  if (!DETECTAR_CORTES) return;
   const v = r?.entero || {}; let cambio = false;
   for (const f of b.frames) {
     if (!(f.name in v)) continue;

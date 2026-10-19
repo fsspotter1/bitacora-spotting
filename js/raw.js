@@ -267,6 +267,7 @@ export async function analyse(blob) {
 // Propone N (principal) y X (segunda) dentro de una ráfaga.
 // Reglas de Fabri: el avión entero y sin nada delante, nítido con el foco en él; nunca una cortada,
 // tapada o desenfocada si hay otra limpia. X solo si es otra fase u otro ángulo.
+export const DETECTAR_CORTES = false;
 export function pickBest(b) {
   const ok = b.frames.filter(f => !f.err);
   b.warn = '';
@@ -279,9 +280,13 @@ export function pickBest(b) {
   });
   // «Cortado» solo descarta si lo confirma la IA (cortadoIA). Lo que calcula la web mirando los bordes se equivoca con
   // fondos de aeropuerto (edificios, hangares, otro avión, nubes) y nunca puede tirar una foto buena: solo resta un poco.
-  const cortada = f => !!f.cortadoIA, dudosa = f => !f.cortadoIA && !f.enteroIA && f.touches > 0;
-  ok.forEach(f => f.score = 50 * f.rel + 15 * Math.min(f.fill, 0.8) - 40 * cortada(f) - 4 * dudosa(f) - 25 * f.obst - 40 * f.soft);
-  const clean = ok.filter(f => !cortada(f) && !f.obst);   // «menos nítida» y «¿cortado?» solo bajan la nota: nunca descartan
+  // «Cortado» y «algo delante» están DESACTIVADOS (19/10/2026): marcaban como malas fotos perfectas (fondos de
+  // aeropuerto, aviones cerca del borde). Se siguen calculando (f.touches, f.obst) pero no cuentan para nada.
+  // Para volver a activarlos: DETECTAR_CORTES = true en este archivo.
+  const cortada = f => DETECTAR_CORTES && !!f.cortadoIA, delante = f => DETECTAR_CORTES && !!f.obst;
+  const dudosa = f => DETECTAR_CORTES && !f.cortadoIA && !f.enteroIA && f.touches > 0;
+  ok.forEach(f => f.score = 50 * f.rel + 15 * Math.min(f.fill, 0.8) - 40 * cortada(f) - 4 * dudosa(f) - 25 * delante(f) - 40 * f.soft);
+  const clean = ok.filter(f => !cortada(f) && !delante(f));   // «menos nítida» solo baja la nota: nunca descarta
   const pool = clean.length ? clean : ok;
   const sorted = [...pool].sort((a, c) => c.score - a.score);
   const best = sorted[0];

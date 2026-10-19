@@ -1,3 +1,4 @@
+import { DETECTAR_CORTES } from './raw.js';
 // v0.2.2 · Identificación con IA. Prepara las imágenes de una ráfaga (foto elegida entera, recorte grande
 // del avión y unas tomas pequeñas más) y las manda al servidor (/api/identificar), que es quien llama a la IA.
 // Solo salen del ordenador estas imágenes reducidas; los RAW nunca.
@@ -86,7 +87,7 @@ export async function prepararImagenes(b) {
   const sospechosas = b.frames.filter(f => !f.err && f.large && f.touches > 0 && !f.enteroIA && !f.cortadoIA && !vistas.has(f.name))
     .sort((p, q) => (q.score || 0) - (p.score || 0)).slice(0, 12).sort((p, q) => p.t - q.t);
   let hoja = null;
-  try { hoja = await hojaContactos(sospechosas); } catch { hoja = null; }
+  if (DETECTAR_CORTES) { try { hoja = await hojaContactos(sospechosas); } catch { hoja = null; } }   // desactivado: no se manda
   if (hoja) imagenes.push(hoja.b64);
   return { imagenes, nRecortes, nHoja: hoja ? hoja.nombres.length : 0, hoja: hoja ? hoja.nombres : [], extras: extras.map(f => f.name), segunda: xF ? xF.name : '' };
 }

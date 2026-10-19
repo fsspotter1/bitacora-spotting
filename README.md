@@ -56,3 +56,6 @@ avión compatible cerca), y se eligen la principal y la segunda entre todas sus 
   principal, se elige otra.
 - *Hoja de contactos*: las tomas con sospecha de «¿cortado?» van en una sola imagen numerada y la IA dice en cuáles
   queda una parte del avión fuera del borde (acercarse o rozar el borde no cuenta).
+- *Desactivado (19/10)*: «cortado» y «algo delante» ya no marcan ni descartan ninguna foto (daban más falsos avisos
+  que aciertos). La principal se elige por nitidez y tamaño del avión. Se reactivan con `DETECTAR_CORTES = true` en
+  js/raw.js.
