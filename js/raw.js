@@ -87,33 +87,89 @@ function colorBorde(px, W, H, side, k) {
   return [r / BORDE, g / BORDE, b / BORDE];
 }
 function mediana(a) { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y), h = s.length >> 1; return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2; }
-function cruzaBorde(px, W, H, side, lo, hi) {
+// Fondo del borde como una curva suave por canal (k → color, parábola): así un cielo en degradado (más oscuro
+// arriba, más claro abajo) no parece «algo distinto» a la altura del avión. Se ajusta dos veces descartando lo que
+// se aparta mucho (nubes sueltas).
+function parabola(pts, c, L) {
+  // mínimos cuadrados de y = a + b·x + d·x² con x = k/L (normal equations 3×3)
+  let S = [0, 0, 0, 0, 0], T = [0, 0, 0];
+  for (const p of pts) { const x = p.k / L, y = p.c[c]; let xp = 1; for (let e = 0; e < 5; e++) { S[e] += xp; if (e < 3) T[e] += xp * y; xp *= x; } }
+  const A = [[S[0], S[1], S[2], T[0]], [S[1], S[2], S[3], T[1]], [S[2], S[3], S[4], T[2]]];
+  for (let i = 0; i < 3; i++) {
+    let m = i; for (let r = i + 1; r < 3; r++) if (Math.abs(A[r][i]) > Math.abs(A[m][i])) m = r;
+    [A[i], A[m]] = [A[m], A[i]];
+    if (Math.abs(A[i][i]) < 1e-9) { const mc = T[0] / (S[0] || 1); return () => mc; }
+    for (let r = 0; r < 3; r++) if (r !== i) { const f = A[r][i] / A[i][i]; for (let q = i; q < 4; q++) A[r][q] -= f * A[i][q]; }
+  }
+  const [a0, a1, a2] = [0, 1, 2].map(i => A[i][3] / A[i][i]);
+  return k => { const x = k / L; return a0 + a1 * x + a2 * x * x; };
+}
+function ajusteFondo(ref, L) {
+  let pts = ref, fit = null;
+  for (let it = 0; it < 2; it++) {
+    fit = [0, 1, 2].map(c => parabola(pts, c, L));
+    if (it) break;
+    const d = pts.map(p => Math.hypot(...[0, 1, 2].map(c => p.c[c] - fit[c](p.k)))), m = mediana(d), mad = mediana(d.map(v => Math.abs(v - m)));
+    const keep = pts.filter((_, i) => d[i] <= m + 3 * mad + 4);
+    if (keep.length >= 0.5 * pts.length) pts = keep;
+  }
+  return fit;
+}
+// Devuelve k, color → ¿hay ese color en la fila/columna k (±2) al otro lado del avión, fuera de su caja?
+// null si al otro lado no queda sitio para mirar (el avión ocupa casi todo el ancho o el alto).
+function franjaOpuesta(px, W, H, side, [bx0, by0, bx1, by1]) {
+  const v = side === 'l' || side === 'r';
+  const L = v ? W : H, a = side === 'r' ? 0 : side === 'l' ? Math.ceil(bx1 * W) + 3 : side === 'b' ? 0 : Math.ceil(by1 * H) + 3;
+  const b = side === 'r' ? Math.floor(bx0 * W) - 3 : side === 'l' ? W - 1 : side === 'b' ? Math.floor(by0 * H) - 3 : H - 1;
+  if (b - a < 3) return null;
+  const M = v ? H : W;
+  return (k, col) => {
+    for (let j = Math.max(0, k - 2); j <= Math.min(M - 1, k + 2); j++)
+      for (let t = a; t <= b; t += 2) {
+        const i = v ? (j * W + t) * 4 : (t * W + j) * 4;
+        if (Math.hypot(px[i] - col[0], px[i + 1] - col[1], px[i + 2] - col[2]) < 20) return true;
+      }
+    return false;
+  };
+}
+function cruzaBorde(px, W, H, side, lo, hi, box) {
   const L = side === 'l' || side === 'r' ? H : W;
   const prof = Array.from({ length: L }, (_, k) => colorBorde(px, W, H, side, k));
   lo = Math.max(0, Math.floor(lo)); hi = Math.min(L, Math.ceil(hi));
   const pad = Math.round(0.03 * L), a = Math.max(0, lo - pad), b = Math.min(L, hi + pad);
-  let ref = [...prof.slice(0, a), ...prof.slice(b)];
-  if (ref.length < 0.15 * L) {   // el avión ocupa casi todo ese lado: el fondo se toma de los cuatro bordes
-    ref = [];
-    for (const s of ['l', 'r', 't', 'b']) { const n = s === 'l' || s === 'r' ? H : W; for (let k = 0; k < n; k += 2) ref.push(colorBorde(px, W, H, s, k)); }
+  const ref = [];
+  for (let k = 0; k < L; k++) if (k < a || k >= b) ref.push({ k, c: prof[k] });
+  let dist;
+  if (ref.length >= 0.15 * L) {
+    const fit = ajusteFondo(ref, L);
+    dist = k => Math.hypot(...[0, 1, 2].map(c => prof[k][c] - fit[c](k)));
+  } else {   // el avión ocupa casi todo ese lado: el fondo se toma de los cuatro bordes
+    const all = [];
+    for (const s of ['l', 'r', 't', 'b']) { const n = s === 'l' || s === 'r' ? H : W; for (let k = 0; k < n; k += 2) all.push(colorBorde(px, W, H, s, k)); }
+    const med = [0, 1, 2].map(c => mediana(all.map(p => p[c])));
+    dist = k => Math.hypot(...[0, 1, 2].map(c => prof[k][c] - med[c]));
   }
-  const med = [0, 1, 2].map(c => mediana(ref.map(p => p[c])));
-  const dist = p => Math.hypot(p[0] - med[0], p[1] - med[1], p[2] - med[2]);
-  const dr = ref.map(dist), m = mediana(dr), mad = mediana(dr.map(v => Math.abs(v - m)));
+  const dr = ref.map(p => dist(p.k)), m = mediana(dr), mad = mediana(dr.map(v => Math.abs(v - m)));
   const thr = Math.max(35, m + 4 * mad);
+  // Lo que asoma al borde y también está en esa misma fila (o columna) al otro lado del avión es fondo en franjas
+  // (horizonte, edificios, monte, nubes, degradado del cielo), no el avión saliéndose del encuadre.
+  const otroLado = box ? franjaOpuesta(px, W, H, side, box) : null;
   let run = 0, best = 0;
-  for (let k = lo; k < hi; k++) { run = dist(prof[k]) > thr ? run + 1 : 0; if (run > best) best = run; }
-  return best >= Math.max(6, 0.02 * L);
+  for (let k = lo; k < hi; k++) {
+    const fuera = dist(k) > thr && !(otroLado && otroLado(k, prof[k]));
+    run = fuera ? run + 1 : 0; if (run > best) best = run;
+  }
+  return best >= Math.max(6, 0.03 * L);
 }
 
 // Lados en los que el avión sale del encuadre: candidatos = caja a menos del 8 % del borde; se confirma con píxeles
 function ladosCortados(px, W, H, bx0, by0, bx1, by1) {
-  const mg = 0.08; let n = 0;
-  if (bx0 < mg && cruzaBorde(px, W, H, 'l', by0 * H, by1 * H)) n++;
-  if (bx1 > 1 - mg && cruzaBorde(px, W, H, 'r', by0 * H, by1 * H)) n++;
-  if (by0 < mg && cruzaBorde(px, W, H, 't', bx0 * W, bx1 * W)) n++;
-  if (by1 > 1 - mg && cruzaBorde(px, W, H, 'b', bx0 * W, bx1 * W)) n++;
-  return n;
+  const mg = 0.08, box = [bx0, by0, bx1, by1]; let lados = '';
+  if (bx0 < mg && cruzaBorde(px, W, H, 'l', by0 * H, by1 * H, box)) lados += 'l';
+  if (bx1 > 1 - mg && cruzaBorde(px, W, H, 'r', by0 * H, by1 * H, box)) lados += 'r';
+  if (by0 < mg && cruzaBorde(px, W, H, 't', bx0 * W, bx1 * W, box)) lados += 't';
+  if (by1 > 1 - mg && cruzaBorde(px, W, H, 'b', bx0 * W, bx1 * W, box)) lados += 'b';
+  return lados;
 }
 
 // Analiza una toma: dónde está el avión (detector; si no carga, bordes), nitidez dentro de él,
@@ -126,7 +182,7 @@ export async function analyse(blob) {
   const c = mk(W), det = mk(640), small = mk(320), big = mk(1600), keep = mk(480);
   const px = c.getContext('2d').getImageData(0, 0, W, H).data, gray = new Float32Array(W * H);
   for (let i = 0; i < W * H; i++) gray[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
-  let x0, x1, y0, y1, obst = 0, found = false, touches;
+  let x0, x1, y0, y1, obst = 0, found = false, lados = '';
   const dets = await detect(det).catch(() => null);
   if (!dets) found = null;   // detector no disponible
   if (dets) {
@@ -134,7 +190,7 @@ export async function analyse(blob) {
     if (planes.length) {
       found = true; const [bx0, by0, bx1, by1] = planes[0].box;
       x0 = Math.round(bx0 * W); x1 = Math.round(bx1 * W); y0 = Math.round(by0 * H); y1 = Math.round(by1 * H);
-      touches = ladosCortados(px, W, H, bx0, by0, bx1, by1);
+      lados = ladosCortados(px, W, H, bx0, by0, bx1, by1);
       // personas, vehículos u otro avión más cerca (más abajo en la foto) encima del avión
       const area = (bx1 - bx0) * (by1 - by0);
       for (const d of dets) {
@@ -152,7 +208,7 @@ export async function analyse(blob) {
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) if (grad[y * W + x] > thr) { colS[x]++; rowS[y]++; }
     const span = a => { let t = 0; for (const v of a) t += v; let s = 0, lo = 0, hi = a.length - 1; for (let i = 0; i < a.length; i++) { s += a[i]; if (s >= t * 0.03) { lo = i; break; } } s = 0; for (let i = a.length - 1; i >= 0; i--) { s += a[i]; if (s >= t * 0.03) { hi = i; break; } } return [lo, hi]; };
     [x0, x1] = span(colS); [y0, y1] = span(rowS);
-    touches = ladosCortados(px, W, H, x0 / W, y0 / H, x1 / W, y1 / H);
+    lados = ladosCortados(px, W, H, x0 / W, y0 / H, x1 / W, y1 / H);
   }
   // huella del avión (para separar aviones distintos dentro de una misma ráfaga)
   let emb = null;
@@ -200,7 +256,7 @@ export async function analyse(blob) {
     sig, obst, found, emb,
     box: [x0 / W, y0 / H, x1 / W, y1 / H],   // dónde está el avión (0–1), para el recorte de la IA
     sharp: n ? (s2 / n - (s / n) ** 2) : 0,
-    touches,
+    touches: lados.length, lados,   // lados por los que el avión sale del encuadre ('l','r','t','b')
     fill: (x1 - x0) / W,
     thumb: URL.createObjectURL(await toBlob(small, 0.8)),
     large: URL.createObjectURL(await toBlob(big, 0.85)),

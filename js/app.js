@@ -218,13 +218,14 @@ function renderAll() {
   $('#bursts').innerHTML = ''; bursts.forEach(renderBurst); renderStat();
 }
 function mergeWithPrev(i) { mergeBursts(i - 1, i); }
+const RANGO = { alta: 3, media: 2, baja: 1 };
+const valorIA = a => a ? (a.matricula ? 10 : 0) + (a.matricula_parcial ? 2 : 0) + (a.verificado ? 5 : 0) + (RANGO[a.confianza] || 0) : -1;
 // Une la ráfaga j con la i (no hace falta que sean seguidas: p. ej. el que rodaba, uno que aterriza y otra vez el que rodaba)
 function mergeBursts(i, j, quiet) {
   const p = bursts[i], b = bursts[j]; if (!p || !b || p === b) return;
   p.frames = p.frames.concat(b.frames).sort((x, y) => x.t - y.t || x.name.localeCompare(y.name));
   ['reg', 'type', 'op'].forEach(k => { if (!p[k] && b[k]) { p[k] = b[k]; if (b.touched?.[k]) p.touched[k] = true; } });
-  const rank = { alta: 3, media: 2, baja: 1 }, valor = a => a ? (a.matricula ? 10 : 0) + (a.verificado ? 5 : 0) + (rank[a.confianza] || 0) : -1;
-  if (b.ai && valor(b.ai) > valor(p.ai)) p.ai = b.ai;
+  if (b.ai && valorIA(b.ai) > valorIA(p.ai)) p.ai = b.ai;
   p.on = p.on || b.on;
   bursts.splice(j, 1); delete b.auto; pickBest(p); delete p.view; renumber(); markSimilar(); markDups();
   if (quiet) return;
@@ -332,6 +333,7 @@ async function runAI(list, retry) {
         if (!token) { const e = new Error('Vuelve a entrar en la web para usar la IA.'); e.code = 'sin_sesion'; throw e; }
         applyAI(b, await identificar(b, { token, aeropuerto: apt, fecha: ymd(b.frames[0].t), comparar: COMPARAR }));
       } catch (e) {
+        delete b.enRepaso;
         if (['sin_clave', 'limite', 'sin_sesion'].includes(e.code)) AI.stopped = e.message;
         else b.aiErr = e.message || 'Error';
       } finally {
@@ -351,6 +353,14 @@ function terminarRonda() {
   } catch (e) { console.error(e); }
   // Al terminar todo, las ráfagas del mismo avión se juntan solas (se pueden volver a separar)
   if (!AI.busy.size) { const n = unirRepetidas(); if (n) toast(`${n} ${n === 1 ? 'ráfaga repetida unida' : 'ráfagas repetidas unidas'} con su avión`); }
+  // Tras unir, el avión puede tener ya mejor foto principal (o una segunda) que la que miró la IA: si no se leyó la
+  // matrícula entera, se vuelve a leer UNA vez con la principal y la segunda nuevas (p. ej. EC-NOS en la toma
+  // cercana, o la letra que tapaba el ala en otra toma).
+  if (!AI.busy.size && aiOn() && !AI.stopped) {
+    const repaso = bursts.filter(b => b.on && b.n && b.ai?.hay_avion && !b.ai.matricula && !b.repaso
+      && (b.ai.para !== b.n || (b.x && b.ai.segunda !== b.x)));
+    if (repaso.length) { repaso.forEach(b => { b.repaso = true; b.enRepaso = true; }); runAI(repaso); }
+  }
 }
 function refresh(b) { if (bursts.includes(b)) renderBurst(b); }
 function renderStat() {
@@ -358,13 +368,44 @@ function renderStat() {
   $('#addStat').textContent = `${bursts.reduce((a, b) => a + b.frames.length, 0)} archivos · ${bursts.length} ráfagas · ${folder}` + (sim ? ` · ${sim} ${sim === 1 ? 'parece' : 'parecen'} el mismo avión que la anterior (revisa «Unir con la anterior»)` : '');
 }
 function applyAI(b, r) {
+  // Segunda pasada tras unir (con la mejor foto y la segunda): si lee peor que la primera, se queda la primera
+  const repaso = b.enRepaso; delete b.enRepaso;
+  if (repaso && b.ai?.hay_avion && valorIA(r) < valorIA(b.ai)) { aplicarEntero(b, r); return; }
   b.ai = r;
   if (!r.hay_avion) { if (!b.touched.on) b.on = false; return; }
+  aplicarEntero(b, r);
   const extra = [r.codigo, r.librea].filter(Boolean).join(' · ');
   const reg = r.matricula ? r.matricula + (extra ? `(${extra})` : '') : '';
   if (!b.touched.reg && reg) b.reg = reg;
   if (!b.touched.type && r.tipo_icao) b.type = r.tipo_icao;
   if (!b.touched.op && r.operador) b.op = r.operador;
+}
+// «Cortado» lo calcula la web mirando los bordes, y a veces confunde con el avión unas nubes, edificios o el
+// degradado del cielo junto al borde. La IA ve la foto de verdad, así que su respuesta manda en las tomas que mira
+// (principal y adicionales). Además, una toma marcada como cortada cuyo avión no está más pegado a ese borde que en
+// otra que la IA ve entera, también está entera.
+const LADO = { l: 0, t: 1, r: 2, b: 3 };
+function aplicarEntero(b, r) {
+  const v = r?.entero || {}; let cambio = false;
+  const limpiar = f => { f.ladosBordes = f.lados; f.touches = 0; f.lados = ''; f.enteroIA = true; cambio = true; };
+  for (const f of b.frames) {
+    if (!(f.name in v)) continue;
+    if (v[f.name] && f.touches) limpiar(f);
+    else if (v[f.name]) f.enteroIA = true;
+    else if (!v[f.name] && !f.touches) { f.touches = 1; f.cortadoIA = true; cambio = true; }
+  }
+  const enteras = b.frames.filter(f => f.enteroIA && f.box);
+  for (const f of b.frames) {
+    if (!f.touches || f.cortadoIA || !f.box || !f.lados) continue;
+    const igualQueEntera = [...f.lados].every(l => enteras.some(o => {
+      const i = LADO[l]; return l === 'l' || l === 't' ? f.box[i] >= o.box[i] - 0.01 : f.box[i] <= o.box[i] + 0.01;
+    }));
+    if (igualQueEntera) limpiar(f);
+  }
+  if (!cambio) return;
+  const n = b.n, x = b.x; pickBest(b);
+  const pn = b.frames.find(f => f.name === n);
+  if (pn && !pn.touches && !pn.obst) { b.n = n; b.x = x; }   // la principal elegida sigue valiendo: no se cambia
 }
 const byAI = (b, k) => (b.ai && !b.touched?.[k] && b[k] ? ' byai' : '');
 function aiLine(b) {

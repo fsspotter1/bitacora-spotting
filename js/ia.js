@@ -14,32 +14,47 @@ function lienzo(src, sx, sy, sw, sh, maxLado) {
 
 // Tomas extra para comprobar que toda la ráfaga es el mismo avión (solo en ráfagas largas): principio, medio y final.
 export function tomasExtra(b) {
-  const ok = b.frames.filter(f => !f.err && f.blob && f.name !== b.n);
+  const ok = b.frames.filter(f => !f.err && f.blob && f.name !== b.n && f.name !== b.x);
   if (b.frames.length < 5 || !ok.length) return [];
   const idx = [0, Math.floor(ok.length / 2), ok.length - 1];
   return [...new Set(idx)].map(i => ok[i]);
+}
+
+// Recorte del avión con margen a resolución completa (hasta 1568 px de lado); si no hay caja, el centro de la foto
+function recorteAvion(bmp, box) {
+  const W = bmp.width, H = bmp.height;
+  let [x0, y0, x1, y1] = box || [0.2, 0.2, 0.8, 0.8];
+  const mx = (x1 - x0) * 0.08 + 0.01, my = (y1 - y0) * 0.15 + 0.01;
+  x0 = Math.max(0, x0 - mx); x1 = Math.min(1, x1 + mx); y0 = Math.max(0, y0 - my); y1 = Math.min(1, y1 + my);
+  return lienzo(bmp, x0 * W, y0 * H, Math.max(16, (x1 - x0) * W), Math.max(16, (y1 - y0) * H), 1568);
 }
 
 export async function prepararImagenes(b) {
   const nF = b.frames.find(f => f.name === b.n);
   if (!nF?.blob) throw new Error('sin foto principal');
   const bmp = await createImageBitmap(nF.blob);
-  const W = bmp.width, H = bmp.height;
-  const entera = lienzo(bmp, 0, 0, W, H, 1024);
-  // recorte del avión con margen; si no hay caja, el centro de la foto
-  let [x0, y0, x1, y1] = nF.box || [0.2, 0.2, 0.8, 0.8];
-  const mx = (x1 - x0) * 0.08 + 0.01, my = (y1 - y0) * 0.15 + 0.01;
-  x0 = Math.max(0, x0 - mx); x1 = Math.min(1, x1 + mx); y0 = Math.max(0, y0 - my); y1 = Math.min(1, y1 + my);
-  const recorte = lienzo(bmp, x0 * W, y0 * H, Math.max(16, (x1 - x0) * W), Math.max(16, (y1 - y0) * H), 1568);
+  const entera = lienzo(bmp, 0, 0, bmp.width, bmp.height, 1024);
+  const recorte = recorteAvion(bmp, nF.box);
   if (bmp.close) bmp.close();
   const imagenes = [await toB64(await toJpeg(entera, 0.8)), await toB64(await toJpeg(recorte, 0.88))];
+  // La segunda foto, recortada también a resolución completa: lo que en la principal tapa el ala o el motor
+  // (p. ej. la tercera letra de la matrícula) suele leerse en otra toma.
+  const xF = b.x && b.frames.find(f => f.name === b.x && f.blob && !f.err);
+  if (xF) {
+    try {
+      const e = await createImageBitmap(xF.blob);
+      imagenes.push(await toB64(await toJpeg(recorteAvion(e, xF.box), 0.85)));
+      if (e.close) e.close();
+    } catch { /* sin segunda, se sigue con la principal */ }
+  }
+  const nRecortes = imagenes.length - 1;
   const extras = tomasExtra(b);
   for (const f of extras) {
     const e = await createImageBitmap(f.blob);
     imagenes.push(await toB64(await toJpeg(lienzo(e, 0, 0, e.width, e.height, 448), 0.75)));
     if (e.close) e.close();
   }
-  return { imagenes, extras: extras.map(f => f.name) };
+  return { imagenes, nRecortes, extras: extras.map(f => f.name), segunda: xF ? xF.name : '' };
 }
 
 // ---------- Fichas por matrícula (v0.2.2) ----------
@@ -101,17 +116,22 @@ function aplicarFicha(v, ver, deMemoria) {
 }
 
 export async function identificar(b, { token, aeropuerto, fecha, comparar }) {
-  const { imagenes, extras } = await prepararImagenes(b);
+  const { imagenes, nRecortes, extras, segunda } = await prepararImagenes(b);
   const r = await fetch('/api/identificar', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ imagenes, aeropuerto, fecha, verificar: false, comparar: !!comparar }),
+    body: JSON.stringify({ imagenes, nRecortes, aeropuerto, fecha, verificar: false, comparar: !!comparar }),
   });
   let j = null; try { j = await r.json(); } catch { /* respuesta vacía */ }
   if (!r.ok) { const e = new Error(j?.mensaje || `Error ${r.status}`); e.code = j?.error || String(r.status); throw e; }
   // nombres de archivo de las tomas que la IA ve como otro avión
   j.otro_avion_en = (j.otras_tomas || []).filter(t => !t.mismo_avion).map(t => extras[t.i]).filter(Boolean);
   j.para = b.n;   // foto con la que se identificó
+  j.segunda = segunda;
+  // ¿sale el avión entero? (la IA lo mira en la principal y en las tomas adicionales) → nombre de archivo: true/false
+  j.entero = {};
+  if (typeof j.avion_entero === 'boolean') j.entero[b.n] = j.avion_entero;
+  (j.otras_tomas || []).forEach(t => { if (typeof t.entero === 'boolean' && t.mismo_avion && extras[t.i]) j.entero[extras[t.i]] = t.entero; });
   // Ficha de la matrícula: de tu bitácora, de una búsqueda anterior de esta sesión o, si es nueva, de internet
   if (j.hay_avion && /^[A-Z0-9.-]{3,12}$/.test(j.matricula || '')) {
     let fallo = 'no respondió';

@@ -43,3 +43,11 @@ Cuesta unas 20 veces más por ráfaga: úsalo solo con una carpeta de prueba.
 **Unión por avión (v0.3):** al terminar la identificación se juntan en una sola entrada todas las ráfagas del mismo
 avión de la carpeta (misma matrícula, matrícula parcial que encaja con una sola, o sin matrícula pero con un único
 avión compatible cerca), y se eligen la principal y la segunda entre todas sus fotos.
+
+**v0.3.1 (beta testers):**
+- *Cortado*: el borde se compara con un degradado ajustado del cielo y con lo que hay en esa misma fila al otro lado
+  del avión (horizonte, edificios, nubes), así que ya no marca como cortado un avión que llena la foto. Además la IA
+  dice si el avión sale entero en la principal y en las tomas adicionales, y su respuesta manda.
+- *Matrículas*: a la IA se le manda también el recorte de la segunda foto a resolución completa, y tras unir las
+  ráfagas del mismo avión, si no se leyó la matrícula entera, se vuelve a leer una vez con la principal y la segunda
+  nuevas.

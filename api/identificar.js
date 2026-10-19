@@ -30,25 +30,39 @@ const ESQUEMA = {
     librea: { type: 'string', description: 'Solo si es una librea especial o retro (Retro, Star Alliance, OneWorld, SkyTeam, un aniversario…); si no, vacío' },
     confianza: { type: 'string', enum: ['alta', 'media', 'baja'], description: 'alta = matrícula legible entera y tipo seguro; media = algo deducido; baja = poco fiable' },
     varios_aviones: { type: 'boolean', description: 'true si en la foto principal hay otro avión que compite como sujeto' },
+    avion_entero: { type: 'boolean', description: 'Imagen 1: true si el avión cabe ENTERO en el encuadre (morro, cola, puntas de ala y estabilizadores dentro), aunque roce el borde; false solo si alguna parte del avión sale de la foto' },
     otras_tomas: {
-      type: 'array', description: 'Para cada toma adicional (en el orden recibido), si muestra el mismo avión que la principal',
-      items: { type: 'object', properties: { i: { type: 'integer' }, mismo_avion: { type: 'boolean' } }, required: ['i', 'mismo_avion'], additionalProperties: false },
+      type: 'array', description: 'Para cada toma adicional (en el orden recibido), si muestra el mismo avión que la principal y si sale entero',
+      items: { type: 'object', properties: { i: { type: 'integer' }, mismo_avion: { type: 'boolean' }, entero: { type: 'boolean', description: 'true si el avión cabe entero en esa toma' } }, required: ['i', 'mismo_avion', 'entero'], additionalProperties: false },
     },
     motivo: { type: 'string', description: 'Explicación breve en español (máx. 20 palabras): qué se lee y qué dudas hay' },
   },
-  required: ['hay_avion', 'matricula', 'matricula_parcial', 'donde_se_lee', 'codigo', 'tipo_icao', 'operador', 'librea', 'confianza', 'varios_aviones', 'otras_tomas', 'motivo'],
+  required: ['hay_avion', 'matricula', 'matricula_parcial', 'donde_se_lee', 'codigo', 'tipo_icao', 'operador', 'librea', 'confianza', 'varios_aviones', 'avion_entero', 'otras_tomas', 'motivo'],
   additionalProperties: false,
 };
 
-function instrucciones({ aeropuerto, fecha, nExtra }) {
+// Qué es cada imagen: 1 foto entera, luego los recortes del avión (el de la principal y, si hay, el de otra toma
+// del mismo avión a resolución completa) y al final las tomas adicionales pequeñas de la ráfaga.
+function etiquetas(n, nRecortes) {
+  return Array.from({ length: n }, (_, i) => i === 0 ? 'Imagen 1 (foto entera):'
+    : i === 1 ? 'Imagen 2 (recorte del avión de la foto principal):'
+    : i <= nRecortes ? `Imagen ${i + 1} (recorte del mismo avión en otra toma, a resolución completa):`
+    : `Imagen ${i + 1} (toma adicional, índice ${i - 1 - nRecortes}):`);
+}
+
+function instrucciones({ aeropuerto, fecha, nExtra, nRecortes = 1 }) {
+  const primeraExtra = 2 + nRecortes;
   return [
     'Eres un spotter experto en identificar aeronaves en fotos. Te paso la foto elegida de una ráfaga:',
     'la imagen 1 es la foto entera y la imagen 2 un recorte ampliado del avión para leer la matrícula.',
-    nExtra ? `Las imágenes 3 a ${2 + nExtra} son otras tomas de la misma ráfaga (índices 0 a ${nExtra - 1} en otras_tomas): di si cada una muestra el MISMO avión que la principal (mismo tipo, librea y matrícula). En el spot se dispara sin pausa a aviones seguidos, así que puede haber otro avión.` : 'No hay tomas adicionales: devuelve otras_tomas vacío.',
+    nRecortes > 1 ? `${nRecortes > 2 ? `Las imágenes 3 a ${1 + nRecortes} son recortes` : 'La imagen 3 es un recorte'} del mismo avión en otra toma, a resolución completa: úsalo también para leer la matrícula (lo que tapa el ala, el motor o un reflejo en una toma suele verse en otra). Si alguno no es el mismo avión, ignóralo.` : '',
+    nExtra ? `${nExtra > 1 ? `Las imágenes ${primeraExtra} a ${primeraExtra + nExtra - 1} son` : `La imagen ${primeraExtra} es`} otras tomas pequeñas de la misma ráfaga (índices 0 a ${nExtra - 1} en otras_tomas): di si cada una muestra el MISMO avión que la principal (mismo tipo, librea y matrícula) y si el avión sale entero. En el spot se dispara sin pausa a aviones seguidos, así que puede haber otro avión.` : 'No hay tomas adicionales: devuelve otras_tomas vacío.',
     aeropuerto ? `Aeropuerto: ${aeropuerto}.` : '',
     fecha ? `Fecha: ${fecha}.` : '',
     'Reglas:',
     '- No inventes matrículas. Pon la matrícula completa solo si la lees entera o es inequívoca. Si solo lees una parte, déjala en matricula_parcial con "?" en los caracteres dudosos y matricula vacía.',
+    '- La matrícula suele ir pequeña en el fuselaje trasero, junto a la cola, o en la deriva: búscala ahí con calma en el recorte antes de darla por ilegible. Si la lees entera en CUALQUIERA de los recortes, ponla completa aunque en la foto principal quede tapada.',
+    '- avion_entero: mira los cuatro bordes de la imagen 1. Un avión que llena la foto de lado a lado con el morro o la cola a pocos píxeles del borde SIGUE entero; solo es false si de verdad falta un trozo (morro, cola, punta de ala o estabilizador fuera de la foto).',
     '- Mira también la compuerta del tren delantero: muchas aerolíneas pintan ahí las últimas 2-3 letras (p. ej. "XI" → D-AIXI). Iberia no las lleva, pero pinta el nombre del avión en el morro.',
     '- Formato de matrícula: con guion cuando lo lleva (EC-MXV, D-AIXI, 9H-ABC); EE. UU. sin guion (N123AB). Militares y gobierno: el serial oficial tal como está pintado (08-8200, A-1102, 330002, C.15-72, T.22-1), sin punto final.',
     '- Militares: NO confundas el serial con el código de unidad. El número grande del morro o la deriva suele ser el código de unidad (España: 15-30, 12-50, 31-21 = ala/escuadrón + número; Italia: 4-12; Francia: 118-AT) y va en "codigo". El serial oficial suele ir pequeño en la deriva o el fuselaje trasero (España: C.15-72, T.21-03; Italia: MM7062; Francia: el número de construcción). Si el serial no se lee, matricula vacía y confianza baja, aunque el código se lea perfectamente.',
@@ -120,7 +134,7 @@ async function compararModelos(imagenes, texto) {
 async function conClaude(imagenes, texto, modelo) {
   const content = [];
   imagenes.forEach((b64, i) => {
-    content.push({ type: 'text', text: i === 0 ? 'Imagen 1 (foto entera):' : i === 1 ? 'Imagen 2 (recorte del avión):' : `Imagen ${i + 1} (toma adicional, índice ${i - 2}):` });
+    content.push({ type: 'text', text: imagenes.etiquetas?.[i] || `Imagen ${i + 1}:` });
     content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
   });
   content.push({ type: 'text', text: texto });
@@ -242,7 +256,7 @@ async function conGemini(imagenes, texto, modelo) {
   const m = modelo || 'gemini-2.5-flash';
   const parts = [];
   imagenes.forEach((b64, i) => {
-    parts.push({ text: i === 0 ? 'Imagen 1 (foto entera):' : i === 1 ? 'Imagen 2 (recorte del avión):' : `Imagen ${i + 1} (toma adicional, índice ${i - 2}):` });
+    parts.push({ text: imagenes.etiquetas?.[i] || `Imagen ${i + 1}:` });
     parts.push({ inline_data: { mime_type: 'image/jpeg', data: b64 } });
   });
   parts.push({ text: texto.replace('Responde solo con el JSON pedido.', 'Responde solo con el JSON pedido.') });
@@ -273,7 +287,9 @@ function limpiar(o, nExtra) {
     librea: s(o.librea),
     confianza: ['alta', 'media', 'baja'].includes(o.confianza) ? o.confianza : 'baja',
     varios_aviones: !!o.varios_aviones,
-    otras_tomas: (Array.isArray(o.otras_tomas) ? o.otras_tomas : []).filter(t => Number.isInteger(t?.i) && t.i >= 0 && t.i < nExtra).map(t => ({ i: t.i, mismo_avion: t.mismo_avion !== false })),
+    avion_entero: typeof o.avion_entero === 'boolean' ? o.avion_entero : null,
+    otras_tomas: (Array.isArray(o.otras_tomas) ? o.otras_tomas : []).filter(t => Number.isInteger(t?.i) && t.i >= 0 && t.i < nExtra)
+      .map(t => ({ i: t.i, mismo_avion: t.mismo_avion !== false, entero: typeof t.entero === 'boolean' ? t.entero : null })),
     motivo: s(o.motivo).slice(0, 300),
   };
 }
@@ -306,7 +322,7 @@ module.exports = async function handler(req, res) {
   }
 
   const imgs = Array.isArray(body?.imagenes) ? body.imagenes.filter(x => typeof x === 'string') : [];
-  if (imgs.length < 2 || imgs.length > 6 || imgs.some(x => x.length > MAX_IMG)) return res.status(400).json({ error: 'imagenes', mensaje: 'Faltan imágenes o son demasiado grandes.' });
+  if (imgs.length < 2 || imgs.length > 7 || imgs.some(x => x.length > MAX_IMG)) return res.status(400).json({ error: 'imagenes', mensaje: 'Faltan imágenes o son demasiado grandes.' });
 
   // Límite diario por usuario (protege el saldo frente a los beta testers). AI_LIMITE_DIA=0 lo quita para todos;
   // AI_SIN_LIMITE = correos separados por comas que no tienen límite (p. ej. el administrador haciendo pruebas).
@@ -316,8 +332,11 @@ module.exports = async function handler(req, res) {
   const uso = await controlarUso(token, limite);
   if (!uso.ok) return res.status(429).json({ error: 'limite', mensaje: `Has llegado al límite de ${limite} identificaciones por hoy. Mañana se renueva.` });
 
-  const nExtra = imgs.length - 2;
-  const texto = instrucciones({ aeropuerto: String(body.aeropuerto || '').slice(0, 4).toUpperCase(), fecha: String(body.fecha || '').slice(0, 10), nExtra });
+  // nRecortes: recortes del avión a resolución completa (principal + otras tomas); los clientes antiguos mandan 1
+  const nRecortes = Math.max(1, Math.min(3, imgs.length - 1, Number.isInteger(body.nRecortes) ? body.nRecortes : 1));
+  const nExtra = imgs.length - 1 - nRecortes;
+  imgs.etiquetas = etiquetas(imgs.length, nRecortes);
+  const texto = instrucciones({ aeropuerto: String(body.aeropuerto || '').slice(0, 4).toUpperCase(), fecha: String(body.fecha || '').slice(0, 10), nExtra, nRecortes });
   try {
     const crudo = proveedor === 'gemini' ? await conGemini(imgs, texto, process.env.AI_MODEL)
       : body.comparar === true ? await compararModelos(imgs, texto)
