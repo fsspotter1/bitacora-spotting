@@ -211,11 +211,12 @@ def sb(metodo, ruta, cuerpo=None, cabeceras=None):
 
 
 def estado(fecha, codigos, **campos):
+    """Crea o actualiza la fila de cada aeropuerto ese día (también si el workflow se lanzó a mano desde GitHub)."""
     if not codigos:
         return
     campos['actualizado'] = datetime.now(timezone.utc).isoformat()
-    q = urllib.parse.urlencode({'fecha': f'eq.{fecha}', 'aeropuerto': f'in.({",".join(codigos)})'})
-    sb('PATCH', f'/rest/v1/adsb_dias?{q}', campos, {'Prefer': 'return=minimal'})
+    filas = [{'aeropuerto': c, 'fecha': fecha, **campos} for c in codigos]
+    sb('POST', '/rest/v1/adsb_dias?on_conflict=aeropuerto,fecha', filas, {'Prefer': 'resolution=merge-duplicates,return=minimal'})
 
 
 def pendientes(fecha):

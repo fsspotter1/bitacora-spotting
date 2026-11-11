@@ -53,7 +53,9 @@ async function lanzar(fecha, aeropuerto) {
 }
 
 module.exports = async function handler(req, res) {
-  if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return res.status(405).json({ error: 'Usa POST' }); }
+  // GET: comprobación rápida de que el servidor tiene el token de GitHub (no devuelve nada secreto)
+  if (req.method === 'GET') return res.status(200).json({ adsb: !!process.env.GITHUB_TOKEN_ADSB });
+  if (req.method !== 'POST') { res.setHeader('Allow', 'GET, POST'); return res.status(405).json({ error: 'Usa POST' }); }
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const u = token && await usuario(token).catch(() => null);
   if (!u?.id) return res.status(401).json({ error: 'sin_sesion', mensaje: 'Vuelve a entrar en la web.' });
