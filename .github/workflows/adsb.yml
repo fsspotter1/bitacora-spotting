@@ -1,0 +1,38 @@
+# v0.3 · Procesa un día de ADS-B (adsb.lol) para los aeropuertos pedidos y lo guarda en Supabase.
+# Lo lanza la web a través de /api/adsb. También se puede lanzar a mano: Actions → ADS-B día → Run workflow.
+name: ADS-B día
+
+on:
+  workflow_dispatch:
+    inputs:
+      fecha:
+        description: Día UTC (AAAA-MM-DD)
+        required: true
+      aeropuertos:
+        description: Códigos ICAO separados por comas (además se procesan los pendientes de ese día)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  procesar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts
+            data
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet orjson
+      - name: Descargar, filtrar y subir
+        env:
+          FECHA: ${{ inputs.fecha }}
+          AEROPUERTOS: ${{ inputs.aeropuertos }}
+          SUPABASE_URL: https://vhhpbulykxiqfwarxlfu.supabase.co
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python3 scripts/adsb_dia.py "$FECHA" "$AEROPUERTOS" --subir

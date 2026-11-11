@@ -2,6 +2,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff, splitByAircraft, DETECTAR_CORTES } from './raw.js';
 import { loadDetector, loadEmbedder } from './detect.js';
 import { identificar, claveReg, fichasDeBitacora } from './ia.js';
+import { rangosCamara, descargarDia, juntarDias, anclas, calibrar, candidatos, decidir, resumir, fechasUtc, regPropia, familia } from './adsb.js';
 
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_lXi2rPoZx8ofeM46jqwBlA_PaSQ2JSX'; // clave pública
@@ -169,6 +170,7 @@ $('#pick').onchange = async ev => {
   if (!files.length) { $('#addStat').textContent = 'No hay RAW en esa carpeta.'; return; }
   folder = (files[0].webkitRelativePath || '').split('/')[0] || '';
   bursts = []; $('#bursts').innerHTML = ''; $('#saveBar').hidden = true; $('#aiBar').hidden = true; $('#pickBtn').disabled = true; AI.stopped = '';
+  clearTimeout(ADSB.timer); Object.assign(ADSB, { fechas: [], estados: {}, mensajes: {}, datos: null, clave: '', cal: null, manual: null, error: '' }); $('#adsbBar').hidden = true;
   const total = files.length; let done = 0; const frames = [];
   const prog = t => { $('#bar').style.width = (100 * done / total) + '%'; $('#addStat').textContent = t; };
   for (const f of files) {
@@ -202,6 +204,7 @@ $('#pick').onchange = async ev => {
   $('#pickBtn').disabled = false; $('#saveBar').hidden = false; updateSave();
   AI.stopped = ''; updateAIBar();
   if (aiOn()) runAI();
+  iniciarADSB();
 };
 function renumber() { bursts.forEach((b, i) => b.id = i); }
 const lastOk = b => [...b.frames].reverse().find(f => f.sig), firstOk = b => b.frames.find(f => f.sig);
@@ -225,6 +228,8 @@ function mergeBursts(i, j, quiet) {
   const p = bursts[i], b = bursts[j]; if (!p || !b || p === b) return;
   p.frames = p.frames.concat(b.frames).sort((x, y) => x.t - y.t || x.name.localeCompare(y.name));
   ['reg', 'type', 'op'].forEach(k => { if (!p[k] && b[k]) { p[k] = b[k]; if (b.touched?.[k]) p.touched[k] = true; } });
+  if (!p.regAdsb && b.regAdsb && p.reg === b.regAdsb) p.regAdsb = b.regAdsb;
+  if (!p.tipoAdsb && b.tipoAdsb && p.type === b.tipoAdsb) p.tipoAdsb = b.tipoAdsb;
   if (b.ai && valorIA(b.ai) > valorIA(p.ai)) p.ai = b.ai;
   p.on = p.on || b.on;
   bursts.splice(j, 1); delete b.auto; pickBest(p); delete p.view; renumber(); markSimilar(); markDups();
@@ -265,12 +270,13 @@ function renderBurst(b) {
         ${b.id > 0 && !b.similar && !b.auto ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}</div>
       ${dupBanner(b)}${otherBanner(b)}
       <div class="inputs">
-        <input type="text" class="reg${byAI(b, 'reg')}" data-k="reg" placeholder="Matrícula" value="${esc(b.reg)}" aria-label="Matrícula">
-        <input type="text" data-k="type" class="${byAI(b, 'type')}" placeholder="Tipo (A320)" value="${esc(b.type)}" aria-label="Tipo">
+        <input type="text" class="reg${byAI(b, 'reg')}${byADSB(b, 'reg')}" data-k="reg" placeholder="Matrícula" value="${esc(b.reg)}" aria-label="Matrícula">
+        <input type="text" data-k="type" class="${byAI(b, 'type')}${byADSB(b, 'type')}" placeholder="Tipo (A320)" value="${esc(b.type)}" aria-label="Tipo">
         <input type="text" data-k="op" class="${byAI(b, 'op')}" placeholder="Operador" value="${esc(b.op)}" aria-label="Operador">
         <label class="field"><input type="checkbox" data-k="on" ${b.on ? 'checked' : ''}> Guardar</label>
       </div>
       ${aiLine(b)}
+      ${adsbLine(b)}
       <div class="strip">${b.frames.map(f => `<button class="th ${f.name === view ? 'v' : ''}" data-f="${esc(f.name)}" title="${esc(f.name)}">${f.thumb ? `<img src="${f.thumb}" alt="">` : ''}${f.name === b.n ? '<span class="tagn">★ N</span>' : f.name === b.x ? '<span class="tagx">X</span>' : ''}${f.err ? '<span class="bad">sin previa</span>' : DETECTAR_CORTES && f.cortadoIA ? '<span class="bad">cortado</span>' : DETECTAR_CORTES && f.obst ? '<span class="bad">algo delante</span>' : DETECTAR_CORTES && f.touches && !f.enteroIA ? '<span class="bad soft" title="Puede que el avión se salga del encuadre; la IA lo comprueba en la principal">¿cortado?</span>' : f.soft ? '<span class="bad soft">¿menos nítida?</span>' : ''}<span class="num">${esc(base(f.name).slice(-4))}</span></button>`).join('')}</div>
       <p class="hint">Haz clic en la foto grande para verla a pantalla completa, y en una miniatura para verla en grande y elige si es la <b>principal (★ N)</b> o la <b>segunda (X)</b>.</p>
     </div>`;
@@ -280,7 +286,7 @@ function renderBurst(b) {
       b.touched[kk] = true; if (kk !== 'on') i.classList.remove('byai');
       if (kk === 'on') el.classList.toggle('off', !b.on); updateSave();
     };
-    i.onchange = () => { i.oninput(); if (i.dataset.k === 'reg') { markSimilar(); markDups(); renderAll(); updateAIBar(); } };
+    i.onchange = () => { i.oninput(); if (i.dataset.k === 'reg' || i.dataset.k === 'type') { if (i.dataset.k === 'reg') b.regAdsb = ''; markSimilar(); markDups(); renderAll(); updateAIBar(); programarCruce(); } };
   });
 }
 $('#bursts').addEventListener('click', e => {
@@ -297,6 +303,7 @@ $('#bursts').addEventListener('click', e => {
   else if (a.dataset.act === 'split') return splitAt(b.id, view);
   else if (a.dataset.act === 'ai') return runAI([b], true);
   else if (a.dataset.act === 'mergedup') { const t = bursts.find(x => x.id === b.dupOf); if (t) mergeBursts(t.id, b.id); return; }
+  else if (a.dataset.act === 'adsbusar') return usarADSB(b, a.dataset.reg, a.dataset.tipo);
   else if (a.dataset.act === 'aiview') { b.view = a.dataset.f; renderBurst(b); document.getElementById('b' + b.id)?.scrollIntoView({ block: 'nearest' }); return; }
   renderBurst(b);
 });
@@ -361,6 +368,7 @@ function terminarRonda() {
       && (b.ai.para !== b.n || (b.x && b.ai.segunda !== b.x)));
     if (repaso.length) { repaso.forEach(b => { b.repaso = true; b.enRepaso = true; }); runAI(repaso); }
   }
+  if (!AI.busy.size) programarCruce();
 }
 function refresh(b) { if (bursts.includes(b)) renderBurst(b); }
 function renderStat() {
@@ -547,6 +555,178 @@ $('#cmpBtn').onclick = () => {
   const sig = difs.find(b => (document.getElementById('b' + b.id)?.getBoundingClientRect().top ?? 0) + window.scrollY > y) || difs[0];
   document.getElementById('b' + sig.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 };
+/* ---------------- v0.3 · cruce con ADS-B ---------------- */
+// Los datos (adsb.lol) se piden al servidor por aeropuerto y día UTC. La primera vez, GitHub Actions tarda unos minutos
+// por día en prepararlos; después quedan guardados para todos. El cruce se hace aquí, en el navegador (js/adsb.js).
+const ADSB = { apt: '', tz: '', fechas: [], estados: {}, mensajes: {}, docs: new Map(), datos: null, clave: '', cal: null, manual: null, timer: 0, pedido: 0, error: '', cargando: false };
+const ESPERA = ['pendiente', 'procesando'];
+const ETIQUETA = { sin_datos: 'sin datos ADS-B', error: 'falló la preparación', aun_no: 'aún no publicado', fuera_de_rango: 'fuera del historial (desde el 10/03/2023 hasta ayer)', sin_clave: 'el ADS-B aún no está activado en el servidor' };
+const adsbOn = () => $('#useADSB').checked;
+try { const v = localStorage.getItem('bs-useADSB'); if (v !== null) $('#useADSB').checked = v === '1'; } catch { /* sin almacenamiento */ }
+$('#useADSB').onchange = () => {
+  try { localStorage.setItem('bs-useADSB', adsbOn() ? '1' : '0'); } catch { /* sin almacenamiento */ }
+  if (adsbOn()) iniciarADSB();
+  else { clearTimeout(ADSB.timer); bursts.forEach(quitarPropuesta); markDups(); renderAll(); updateSave(); pintarADSB(); }
+};
+$('#apt').addEventListener('change', () => { if (bursts.length) iniciarADSB(); });
+$('#adsbDelta').addEventListener('change', e => {
+  const v = e.target.value.trim(); ADSB.manual = v === '' || !Number.isFinite(+v) ? null : +v; cruzarADSB();
+});
+const claveDia = f => ADSB.apt + '|' + f;
+const fmtDia = f => `${f.slice(8, 10)}/${f.slice(5, 7)}`;
+
+async function iniciarADSB() {
+  clearTimeout(ADSB.timer);
+  if (!adsbOn() || !bursts.length) { pintarADSB(); return; }
+  const apt = $('#apt').value.trim().toUpperCase();
+  if (apt !== ADSB.apt) {
+    Object.assign(ADSB, { apt, tz: '', fechas: [], estados: {}, mensajes: {}, datos: null, clave: '', cal: null });
+    bursts.forEach(b => { quitarPropuesta(b); b.adsb = null; }); renderAll();
+  }
+  ADSB.error = '';
+  if (!/^[A-Z0-9]{4}$/.test(apt)) { ADSB.error = 'escribe el aeropuerto (código ICAO, p. ej. LEVC) para cruzar las fotos con el ADS-B.'; pintarADSB(); return; }
+  await pedirADSB({ rangos: rangosCamara(bursts) });
+}
+async function pedirADSB(cuerpo) {
+  const { data } = await sb.auth.getSession(); const tk = data.session?.access_token;
+  if (!tk) { ADSB.error = 'vuelve a entrar en la web para usar el ADS-B.'; pintarADSB(); return; }
+  const apt = ADSB.apt;
+  ADSB.pedido = Date.now(); ADSB.cargando = true; pintarADSB();
+  try {
+    const r = await fetch('/api/adsb', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tk}` }, body: JSON.stringify({ aeropuerto: apt, ...cuerpo }) });
+    const j = await r.json().catch(() => null);
+    if (apt !== ADSB.apt) return;
+    if (!j) throw new Error(`el servidor respondió ${r.status}`);
+    if (j.tz) ADSB.tz = j.tz;
+    ADSB.fechas = [...new Set([...ADSB.fechas, ...(j.fechas || [])])].sort();
+    Object.assign(ADSB.estados, j.estados || {}); Object.assign(ADSB.mensajes, j.mensajes || {});
+    if (!r.ok) ADSB.error = j.mensaje || `error ${r.status}`;
+  } catch (e) { ADSB.error = 'no se pudo pedir el ADS-B: ' + e.message; }
+  finally { ADSB.cargando = false; }
+  vigilarADSB();
+}
+// Mira en Supabase cómo van los días pedidos, descarga los que ya están y vuelve a mirar cada 20 s mientras falte alguno
+async function vigilarADSB() {
+  clearTimeout(ADSB.timer);
+  const apt = ADSB.apt;
+  const faltan = ADSB.fechas.filter(f => !ADSB.docs.has(claveDia(f)) && (ESPERA.includes(ADSB.estados[f]) || ADSB.estados[f] === 'listo'));
+  if (faltan.length) {
+    const { data } = await sb.from('adsb_dias').select('fecha,estado,ruta,mensaje').eq('aeropuerto', apt).in('fecha', faltan);
+    if (apt !== ADSB.apt) return;   // cambió el aeropuerto mientras tanto
+    for (const row of data || []) {
+      ADSB.estados[row.fecha] = row.estado; ADSB.mensajes[row.fecha] = row.mensaje || '';
+      if (row.estado === 'listo' && row.ruta) {
+        try { ADSB.docs.set(claveDia(row.fecha), await descargarDia(`${SUPABASE_URL}/storage/v1/object/public/adsb/${row.ruta}`)); }
+        catch (e) { ADSB.estados[row.fecha] = 'error'; ADSB.mensajes[row.fecha] = 'no se pudo descargar: ' + e.message; }
+      }
+    }
+  }
+  if (apt !== ADSB.apt) return;
+  const docs = ADSB.fechas.map(f => ADSB.docs.get(claveDia(f))).filter(Boolean);
+  const clave = apt + ':' + docs.map(d => d.fecha).join(',');
+  if (docs.length && clave !== ADSB.clave) { ADSB.clave = clave; ADSB.datos = juntarDias(docs); ADSB.tz ||= ADSB.datos.apt?.tz || ''; cruzarADSB(); }
+  if (ADSB.fechas.some(f => !ADSB.docs.has(claveDia(f)) && ESPERA.includes(ADSB.estados[f]))) {
+    // si un día lleva mucho en cola (p. ej. el procesado se cortó), se vuelve a pedir: el servidor lo relanza
+    if (Date.now() - ADSB.pedido > 22 * 60000) { pedirADSB({ fechas: ADSB.fechas }); return; }
+    ADSB.timer = setTimeout(vigilarADSB, 20000);
+  }
+  pintarADSB();
+}
+
+let cruceT = 0;
+function programarCruce() { clearTimeout(cruceT); cruceT = setTimeout(cruzarADSB, 400); }
+// Calibra la hora de la cámara con las matrículas ya conocidas y mira qué dice el ADS-B de cada ráfaga
+function cruzarADSB() {
+  if (!adsbOn() || !ADSB.datos?.aviones.length || !bursts.length) { pintarADSB(); return; }
+  const tz = ADSB.tz, datos = ADSB.datos;
+  const cal = ADSB.cal = calibrar(anclas(bursts, datos), tz, ADSB.manual);
+  // con el desfase calculado, ¿hacen falta otros días UTC? (p. ej. la cámara iba en la hora de otro país)
+  const extra = cal.calibrado ? fechasUtc(bursts, tz, cal.delta).filter(f => !ADSB.fechas.includes(f)) : [];
+  if (extra.length) pedirADSB({ fechas: extra });
+  let cambios = 0;
+  for (const b of bursts) {
+    const antes = JSON.stringify(b.adsb || null) + b.reg + b.type;
+    if (!b.n || b.ai?.hay_avion === false) { quitarPropuesta(b); b.adsb = null; }
+    else {
+      const r = decidir(b, candidatos(b, datos, cal, tz), datos);
+      b.adsb = resumir(r, b, tz, cal);
+      if (r.estado === 'propuesta') proponer(b, r.c); else if (!regPropia(b)) quitarPropuesta(b);
+    }
+    if (antes !== JSON.stringify(b.adsb || null) + b.reg + b.type) { cambios++; refresh(b); }
+  }
+  if (cambios) {
+    markSimilar(); markDups();
+    // las ráfagas del mismo avión (ahora con matrícula) se juntan solas, como con la IA
+    const n = AI.busy.size ? 0 : unirRepetidas();
+    if (n) { toast(`${n} ${n === 1 ? 'ráfaga unida' : 'ráfagas unidas'} con su avión gracias al ADS-B`); programarCruce(); }
+    else renderAll();
+    updateSave(); updateAIBar();
+  }
+  pintarADSB();
+}
+// Matrícula propuesta por el ADS-B: se escribe en el campo (con borde discontinuo) mientras no la cambies tú
+function proponer(b, c) {
+  if (b.touched.reg || (b.reg && b.reg !== b.regAdsb)) return;
+  b.reg = c.reg; b.regAdsb = c.reg;
+  if (!b.touched.type && c.tipo && (!b.type || b.type === b.tipoAdsb || familia(b.type) === familia(c.tipo))) { b.type = c.tipo; b.tipoAdsb = c.tipo; }
+}
+function quitarPropuesta(b) {
+  if (b.regAdsb && b.reg === b.regAdsb && !b.touched.reg) b.reg = '';
+  if (b.tipoAdsb && b.type === b.tipoAdsb && !b.touched.type) b.type = b.ai?.tipo_icao || '';
+  b.regAdsb = ''; b.tipoAdsb = '';
+}
+function usarADSB(b, reg, tipo) {
+  b.reg = reg; b.touched.reg = true; b.regAdsb = '';
+  if (tipo && !b.touched.type) { b.type = tipo; b.tipoAdsb = ''; }
+  markSimilar(); markDups(); renderAll(); updateSave(); updateAIBar(); programarCruce();
+}
+const byADSB = (b, k) => (k === 'reg' ? b.regAdsb && b.reg === b.regAdsb : b.tipoAdsb && b.type === b.tipoAdsb) && !b.touched?.[k] ? ' byadsb' : '';
+const descADSB = c => [c.tipo, c.cs, c.fase].filter(Boolean).map(esc).join(' · ');
+const botonADSB = (c, usar) => `<button class="btn sm ghost" data-act="adsbusar" data-reg="${esc(c.reg)}" data-tipo="${esc(c.tipo)}" title="Usar esta matrícula">${usar ? 'Usar ' : ''}${esc(c.reg)} <small>${descADSB(c)}</small></button>`;
+function adsbLine(b) {
+  const a = adsbOn() && b.adsb; if (!a) return '';
+  const tag = '<span class="tag">ADS-B</span>';
+  switch (a.estado) {
+    case 'confirmada': return `<p class="adsbline ok">${tag}<span>✓ <b>${esc(a.reg)}</b> ${descADSB(a)} a las ${esc(a.hora)}</span></p>`;
+    case 'propuesta': return b.regAdsb && b.reg === b.regAdsb
+      ? `<p class="adsbline prop">${tag}<span>Matrícula propuesta: <b>${esc(a.reg)}</b> ${descADSB(a)} a las ${esc(a.hora)} — el único avión a esa hora que encaja ${a.por === 'parcial' ? 'con la matrícula parcial' : 'con el tipo'}. Compruébala.</span></p>` : '';
+    case 'corregir': return `<p class="adsbline warn">${tag}<span>⚠ A esa hora no consta ${esc(b.reg)}, pero sí <b>${esc(a.reg)}</b> (${descADSB(a)}): ¿la IA leyó mal una letra?</span>${botonADSB(a, true)}</p>`;
+    case 'otra_hora': return `<p class="adsbline warn">${tag}<span>${esc(a.reg)} estuvo en ${esc(ADSB.apt)} ese día (a las ${esc(a.hora)}), pero no a la hora de esta foto: revisa la matrícula.</span></p>`;
+    case 'no_consta': return `<p class="adsbline">${tag}<span>${esc(b.reg)} no aparece en el ADS-B de ese día (puede que no emita o que no haya cobertura).</span>${(a.top || []).map(c => botonADSB(c)).join('')}</p>`;
+    case 'candidatos': return a.top?.length ? `<p class="adsbline">${tag}<span>A esa hora:</span>${a.top.map(c => botonADSB(c)).join('')}</p>` : '';
+    default: return '';
+  }
+}
+function relojCamara(cal) {
+  const d = Math.round(Math.abs(cal.delta)), txt = d >= 60 ? `${Math.floor(d / 60)} h${d % 60 ? ' ' + (d % 60) + ' min' : ''}` : `${d} min`;
+  if (cal.manual) return `hora de la cámara corregida a mano (${cal.delta > 0 ? '+' : ''}${cal.delta} min)`;
+  if (!cal.calibrado) return 'hora de la cámara sin comprobar (hacen falta 2 aviones con matrícula, leída o escrita): se usa la hora local del aeropuerto';
+  if (!d) return `la hora de la cámara cuadra (comprobado con ${cal.n} aviones)`;
+  return `la cámara iba ${txt} ${cal.delta < 0 ? 'adelantada' : 'atrasada'} (calculado con ${cal.n} aviones; ya está corregido)`;
+}
+function pintarADSB() {
+  const bar = $('#adsbBar');
+  if (!adsbOn() || !bursts.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const partes = [];
+  const esperan = ADSB.fechas.filter(f => !ADSB.docs.has(claveDia(f)) && ESPERA.includes(ADSB.estados[f]));
+  if (ADSB.cargando && !ADSB.fechas.length) partes.push('pidiendo los datos…');
+  if (esperan.length) partes.push(`preparando ${esperan.map(fmtDia).join(', ')} (la primera vez tarda unos 5 min por día; después queda guardado)`);
+  if (ADSB.datos && ADSB.cal) {
+    const n = {}; bursts.forEach(b => { if (b.adsb) n[b.adsb.estado] = (n[b.adsb.estado] || 0) + 1; });
+    const props = bursts.filter(b => b.adsb?.estado === 'propuesta' && b.regAdsb && b.reg === b.regAdsb).length;
+    partes.push(`${ADSB.datos.aviones.length} aviones en ${ADSB.datos.fechas.map(fmtDia).join(', ')}`, relojCamara(ADSB.cal),
+      [n.confirmada && `${n.confirmada} confirmadas`, props && `${props} propuestas`, n.corregir && `${n.corregir} posibles errores de lectura`,
+        (n.otra_hora || n.no_consta) && `${(n.otra_hora || 0) + (n.no_consta || 0)} sin rastro a esa hora`, n.candidatos && `${n.candidatos} con candidatos para elegir`].filter(Boolean).join(', ') || 'sin coincidencias');
+  }
+  for (const f of ADSB.fechas) if (!ESPERA.includes(ADSB.estados[f]) && ADSB.estados[f] !== 'listo' && ADSB.estados[f]) partes.push(`${fmtDia(f)}: ${ADSB.mensajes[f] || ETIQUETA[ADSB.estados[f]] || ADSB.estados[f]}`);
+  if (ADSB.error) partes.push(ADSB.error);
+  $('#adsbStat').textContent = `ADS-B${ADSB.apt ? ' · ' + ADSB.apt : ''}: ` + (partes.join(' · ') || '…');
+  const inp = $('#adsbDelta');
+  if (document.activeElement !== inp) inp.value = ADSB.manual != null ? ADSB.manual : '';
+  inp.placeholder = ADSB.cal && !ADSB.cal.manual ? String(Math.round(ADSB.cal.delta)) : 'auto';
+}
+
 function notaDe(b) {
   const r = b.ai, rev = [];
   if (b.warn) rev.push(b.warn);
@@ -558,7 +738,13 @@ function notaDe(b) {
     if (r.para && r.para !== b.n) rev.push('la IA miró otra foto de la ráfaga');
     if (b.touched.reg && r.matricula && claveReg(r.matricula) !== claveReg(b.reg)) rev.push('la IA leyó ' + r.matricula);
   }
-  return [rev.length ? '⚠ Revisar: ' + rev.join('; ') : '', r ? `IA (${r.confianza}): ${r.motivo}` : ''].filter(Boolean).join(' · ');
+  const a = adsbOn() ? b.adsb : null;
+  if (a?.estado === 'propuesta' && b.regAdsb && b.reg === b.regAdsb) rev.push(`matrícula propuesta por el ADS-B (${a.fase} a las ${a.hora}), no leída en la foto`);
+  else if (a?.estado === 'corregir') rev.push(`ADS-B: a esa hora estaba ${a.reg}, no ${b.reg}`);
+  else if (a?.estado === 'otra_hora') rev.push(`ADS-B: ${a.reg} estuvo ese día a las ${a.hora}, no a la hora de la foto`);
+  else if (a?.estado === 'no_consta') rev.push('la matrícula no aparece en el ADS-B ese día');
+  const adsbTxt = a?.estado === 'confirmada' ? `✓ ADS-B (adsb.lol): ${a.fase} a las ${a.hora}` : '';
+  return [rev.length ? '⚠ Revisar: ' + rev.join('; ') : '', adsbTxt, r ? `IA (${r.confianza}): ${r.motivo}` : ''].filter(Boolean).join(' · ');
 }
 
 function updateSave() { const n = bursts.filter(b => b.on && b.n).length, off = bursts.filter(b => !b.on).length; $('#saveStat').textContent = `${n} ráfagas se guardarán como pendientes en «${folder}»` + (off ? ` · ${off} desmarcadas` : ''); $('#saveBtn').disabled = !n; }
@@ -575,7 +761,7 @@ $('#saveBtn').onclick = async () => {
       if (up.error) thumb_path = null;
     }
     const row = { fecha: ymd(b.frames[0].t), matricula: b.reg, tipo: b.type, operador: b.op, aeropuerto: apt, carpeta: folder, archivo: base(b.n), archivo2: b.x ? base(b.x) : '', nota: notaDe(b), pendiente: true, thumb_path };
-    if (b.ai) row.ia = { ...b.ai, otras_tomas: undefined, otro_avion_en: undefined };
+    if (b.ai || b.adsb) row.ia = { ...(b.ai || {}), otras_tomas: undefined, otro_avion_en: undefined, adsb: (adsbOn() && b.adsb) || undefined };
     let { data, error } = await sb.from('entries').insert(row).select().single();
     if (error && row.ia && /\bia\b/.test(error.message)) { delete row.ia; ({ data, error } = await sb.from('entries').insert(row).select().single()); }
     if (error) { fail++; continue; }

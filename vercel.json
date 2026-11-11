@@ -1,5 +1,6 @@
 {
   "functions": {
-    "api/identificar.js": { "maxDuration": 120 }
+    "api/identificar.js": { "maxDuration": 120 },
+    "api/adsb.js": { "maxDuration": 30 }
   }
 }

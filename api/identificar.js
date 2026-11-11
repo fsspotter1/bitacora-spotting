@@ -1,4 +1,4 @@
-// Identificación de aviones con IA (v0.3).
+// Identificación de aviones con IA (v0.2; Haiku lee y Sonnet revisa desde la v0.2.3).
 // La web manda la foto elegida de una ráfaga (entera + recorte grande del avión) y, si la ráfaga es larga,
 // unas tomas pequeñas más para comprobar que todo es el mismo avión. Devuelve matrícula, tipo y operador
 // sugeridos, con el nivel de confianza. Las claves de la IA viven solo aquí (variables de entorno de Vercel).

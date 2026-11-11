@@ -9,6 +9,9 @@ no se suben los originales, solo una miniatura (~30 KB) de la foto elegida de ca
   foto elegida reducida y un recorte del avión; el servidor (función de Vercel) llama a la IA con la clave guardada en Vercel.
 - `supabase/schema.sql` — tablas, permisos (cada usuario solo ve lo suyo) y almacén de miniaturas.
 - `supabase/v0.2.sql` — lo nuevo de la v0.2 (columna `ia` y tabla `ai_uso` para el límite diario).
+- `js/adsb.js` + `api/adsb.js` + `scripts/adsb_dia.py` + `.github/workflows/adsb.yml` — v0.3: cruce con ADS-B (adsb.lol).
+- `supabase/v0.3.sql` — lo nuevo de la v0.3 (tabla `adsb_dias`, funciones para pedir días y almacén público `adsb`).
+- `data/aeropuertos.json` — ICAO → coordenadas, elevación y zona horaria (de mwgg/Airports, licencia MIT).
 
 ## Puesta en marcha
 1. Supabase → SQL Editor → pegar `supabase/schema.sql` → Run.
@@ -40,11 +43,11 @@ Navegadores: Chrome, Edge, Firefox o Safari recientes en ordenador.
 modelos, la barra de IA cuenta en cuántas coinciden las matrículas y «Ver diferencias» salta a las que no.
 Cuesta unas 20 veces más por ráfaga: úsalo solo con una carpeta de prueba.
 
-**Unión por avión (v0.3):** al terminar la identificación se juntan en una sola entrada todas las ráfagas del mismo
+**Unión por avión (v0.2.3):** al terminar la identificación se juntan en una sola entrada todas las ráfagas del mismo
 avión de la carpeta (misma matrícula, matrícula parcial que encaja con una sola, o sin matrícula pero con un único
 avión compatible cerca), y se eligen la principal y la segunda entre todas sus fotos.
 
-**v0.3.1 (beta testers):**
+**v0.2.4 (beta testers):**
 - *Cortado*: el borde se compara con un degradado ajustado del cielo y con lo que hay en esa misma fila al otro lado
   del avión (horizonte, edificios, nubes), así que ya no marca como cortado un avión que llena la foto. Además la IA
   dice si el avión sale entero en la principal y en las tomas adicionales, y su respuesta manda.
@@ -59,3 +62,38 @@ avión compatible cerca), y se eligen la principal y la segunda entre todas sus 
 - *Desactivado (19/10)*: «cortado» y «algo delante» ya no marcan ni descartan ninguna foto (daban más falsos avisos
   que aciertos). La principal se elige por nitidez y tamaño del avión. Se reactivan con `DETECTAR_CORTES = true` en
   js/raw.js.
+
+## v0.3 · Cruce con ADS-B
+Cada ráfaga se cruza con el historial ADS-B del aeropuerto (datos abiertos de [adsb.lol](https://adsb.lol), licencia ODbL)
+para saber qué aviones estaban aterrizando, despegando, rodando o parados a la hora de la foto.
+
+**Cómo funciona**
+1. Al registrar una carpeta con el aeropuerto escrito, la web pide a `/api/adsb` los días de la carpeta. El servidor los pasa a
+   días UTC con la zona horaria del aeropuerto y, si un día no está aún preparado, lanza el workflow «ADS-B día» de GitHub
+   Actions. Este descarga el historial mundial de ese día (~3,7 GB), guarda solo los aviones que pasaron a menos de 15 km
+   del aeropuerto por debajo de 6.000 ft sobre su elevación (~150–800 KB) y lo sube a Supabase. Tarda unos 4–5 min por día
+   y solo se hace una vez: después vale para todos los usuarios.
+2. En el navegador se calibra la hora de la cámara con las ráfagas cuya matrícula ya se conoce (leída por la IA o escrita a
+   mano): el desfase bueno es el que pone a todos esos aviones en el aeropuerto, y cerca unos de otros, a la hora de su
+   foto. Detecta solo cámaras con la hora de verano, minutos de adelanto o la hora de otro país. Se puede corregir a mano.
+3. Para cada ráfaga dice: **✓ confirmada** (la matrícula estaba allí a esa hora), **⚠ posible error de lectura** (no
+   estaba, pero sí otra casi igual del mismo tipo: botón «Usar …»), **matrícula propuesta** (la IA no la leyó, pero solo
+   un avión de ese tipo o con esa matrícula parcial encaja; se escribe con borde discontinuo y la nota lo dice) o una
+   **lista de candidatos** para elegir con un clic.
+4. Las ráfagas que pasan a tener la misma matrícula se unen solas, como con la IA. Al guardar, el resultado va en la nota
+   y en `ia.adsb`.
+
+Historial disponible: desde el 10/03/2023 hasta ayer (adsb.lol publica cada día unas horas después de medianoche UTC).
+En aeropuertos con poca cobertura en tierra (o aviones sin transpondedor) habrá ráfagas sin datos.
+
+**Activarlo**
+1. Supabase → SQL Editor → pegar `supabase/v0.3.sql` → Run.
+2. Supabase → Project Settings → API Keys → crear una *secret key* (`sb_secret_…`). GitHub → este repositorio → Settings →
+   Secrets and variables → Actions → New repository secret: `SUPABASE_SERVICE_KEY` = esa clave.
+3. GitHub → tu perfil → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate:
+   solo este repositorio, permiso *Actions: Read and write*. Vercel → Settings → Environment Variables:
+   `GITHUB_TOKEN_ADSB` = ese token → Save → Redeploy.
+Sin esas claves la web funciona igual que la v0.2 y la barra del ADS-B dice que aún no está activado.
+
+Prueba manual del procesado: GitHub → Actions → «ADS-B día» → Run workflow (fecha `2026-11-10`, aeropuertos `LEVC`).
+En local: `python3 scripts/adsb_dia.py 2026-11-10 LEVC --salida out/` (sin subir nada).
