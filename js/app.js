@@ -162,7 +162,7 @@ $('#resetBtn').onclick = async () => {
 };
 
 /* ---------------- registrar carpeta ---------------- */
-let bursts = [], folder = '';
+let bursts = [], folder = '', paresJpg = 0;
 $('#pickBtn').onclick = () => { loadDetector(); loadEmbedder(); $('#pick').click(); };
 $('#pick').onchange = async ev => {
   const files = [...ev.target.files].filter(f => RAW_RE.test(f.name) && !f.name.startsWith('.'));
@@ -179,6 +179,7 @@ $('#pick').onchange = async ev => {
     if (++done % 20 === 0) prog(`Leyendo ${done}/${total}`);
   }
   frames.sort((a, b) => a.t - b.t || a.name.localeCompare(b.name));
+  paresJpg = unirParesRawJpg(frames);
   const gap = (+$('#gap').value || 8) * 1000; let cur = [];
   frames.forEach((f, i) => { if (i && f.t - frames[i - 1].t > gap) { bursts.push({ frames: cur }); cur = []; } cur.push(f); });
   if (cur.length) bursts.push({ frames: cur });
@@ -194,9 +195,9 @@ $('#pick').onchange = async ev => {
     if (parts.length > 1) {
       const nbs = parts.map((fr, k) => k ? { frames: fr, reg: '', type: '', op: '', on: true, auto: true, touched: {} } : Object.assign(b, { frames: fr }));
       bursts.splice(bi, 1, ...nbs); renumber(); splits += parts.length - 1;
-      nbs.forEach(x => { pickBest(x); if (x.loose) x.on = false; });
+      nbs.forEach(x => { pickBest(x); desmarcarSuelta(x); });
       bi += nbs.length - 1; $('#bursts').innerHTML = ''; bursts.slice(0, bi + 1).forEach(renderBurst);
-    } else { pickBest(b); if (b.loose) b.on = false; renderBurst(b); }
+    } else { pickBest(b); desmarcarSuelta(b); renderBurst(b); }
     prog(`Analizando ${done}/${total} · ráfaga ${bi + 1}/${bursts.length}` + (splits ? ` · ${splits} separadas por cambio de avión` : ''));
   }
   markSimilar(); renderAll();
@@ -207,6 +208,28 @@ $('#pick').onchange = async ev => {
   iniciarADSB();
 };
 function renumber() { bursts.forEach((b, i) => b.id = i); }
+// Con RAW+JPG, la cámara guarda la misma foto dos veces (FSS_2195.NEF y FSS_2195.JPG, a la misma hora): se queda una
+// sola toma, el RAW (o el JPG si el RAW no se pudo leer). Mismo nombre a otra hora (contador reiniciado) = otra foto.
+// Cambia la lista en su sitio (ordenada por hora) y devuelve cuántas copias se quitaron.
+function unirParesRawJpg(frames) {
+  const jpg = f => /\.jpe?g$/i.test(f.name), out = [], porNombre = new Map(); let quitadas = 0;
+  for (const f of frames) {
+    const k = base(f.name).toUpperCase();
+    const i = (porNombre.get(k) || []).find(j => Math.abs(out[j].t - f.t) <= 2000 && jpg(out[j]) !== jpg(f));
+    if (i === undefined) { porNombre.set(k, [...(porNombre.get(k) || []), out.length]); out.push(f); continue; }
+    quitadas++;
+    const o = out[i];
+    if ((o.err && !f.err) || (!f.err && jpg(o) && !jpg(f))) out[i] = f;
+  }
+  frames.splice(0, frames.length, ...out);
+  return quitadas;
+}
+// Toma suelta (1–2 fotos sin avión detectado o con el avión diminuto): se desmarca para no guardarla, salvo que tú la
+// hayas marcado. offPor guarda el porqué para decirlo en la tarjeta (y para que la IA revise las «sin avión»).
+function desmarcarSuelta(b) { if (b.loose && !b.touched?.on) { b.on = false; b.offPor = b.suelta || 'diminuto'; } }
+// Ráfagas que la IA identifica sola: las marcadas para guardar y las tomas sueltas en las que el detector del navegador
+// no vio avión (falla con poca luz, p. ej. el Binter al anochecer). Las que desmarcas tú no se tocan.
+const pendienteIA = b => !!b.n && !b.ai && (b.on || (b.offPor === 'sin_avion' && !b.touched?.on));
 const lastOk = b => [...b.frames].reverse().find(f => f.sig), firstOk = b => b.frames.find(f => f.sig);
 // Avión parado (nocturnas, rampa): ráfagas separadas en el tiempo pero con la misma escena
 function markSimilar() {
@@ -232,6 +255,7 @@ function mergeBursts(i, j, quiet) {
   if (!p.tipoAdsb && b.tipoAdsb && p.type === b.tipoAdsb) p.tipoAdsb = b.tipoAdsb;
   if (b.ai && valorIA(b.ai) > valorIA(p.ai)) p.ai = b.ai;
   p.on = p.on || b.on;
+  p.offPor = p.on ? '' : p.offPor || b.offPor || '';
   bursts.splice(j, 1); delete b.auto; pickBest(p); delete p.view; renumber(); markSimilar(); markDups();
   if (quiet) return;
   renderAll(); updateSave(); updateAIBar();
@@ -247,6 +271,14 @@ function splitAt(i, name) {
   if (aiOn()) runAI([b, nb]);
 }
 const hm = t => new Date(t).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+// Por qué una ráfaga está sin marcar (si la desmarcó la web; si la desmarcas tú, no hace falta decirlo)
+function avisoDesmarcada(b) {
+  if (b.on || b.touched?.on || !b.offPor || b.offPor === 'ia') return '';
+  if (b.offPor === 'sin_avion') return b.ai ? '' : aiOn()
+    ? 'Toma suelta en la que el detector no ve ningún avión (pasa con poca luz): la IA la revisa y, si ve uno, la marca para guardar.'
+    : 'Toma suelta en la que el detector no ve ningún avión (pasa con poca luz). No se guardará salvo que marques «Guardar».';
+  return 'Toma suelta: el avión sale muy pequeño en 1–2 fotos (parece un disparo sin finalidad o el inicio de una ráfaga). No se guardará salvo que marques «Guardar».';
+}
 function renderBurst(b) {
   let el = document.getElementById('b' + b.id);
   if (!el) { el = document.createElement('article'); el.id = 'b' + b.id; $('#bursts').appendChild(el); }
@@ -265,7 +297,7 @@ function renderBurst(b) {
     <div class="meta">
       ${b.similar ? `<div class="similar"><span>Parece el mismo avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Unir con la anterior</button></div>` : ''}
       ${b.auto ? '<div class="similar"><span>Separada automáticamente: parece otro avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Es el mismo: unir</button></div>' : ''}
-      ${b.loose && !b.on ? '<p class="warnline">Toma suelta: parece un disparo sin finalidad o el inicio de una ráfaga. No se guardará salvo que marques «Guardar».</p>' : b.warn ? `<p class="warnline">⚠ ${esc(b.warn)}: revisa la ráfaga.</p>` : ''}
+      ${avisoDesmarcada(b) ? `<p class="warnline">${avisoDesmarcada(b)}</p>` : b.warn ? `<p class="warnline">⚠ ${esc(b.warn)}: revisa la ráfaga.</p>` : ''}
       <div class="row"><span class="time">${hm(b.frames[0].t)}</span><span class="files">${esc(base(b.frames[0].name))} – ${esc(base(b.frames[k - 1].name))} · ${k} ${k === 1 ? 'foto' : 'fotos'}</span>
         ${b.id > 0 && !b.similar && !b.auto ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}</div>
       ${dupBanner(b)}${otherBanner(b)}
@@ -323,7 +355,7 @@ const hhmm = t => new Date(t).toLocaleTimeString('es-ES', { hour: '2-digit', min
 async function runAI(list, retry) {
   if (retry) AI.stopped = '';
   if (AI.stopped) { updateAIBar(); return; }
-  const todo = (list || bursts.filter(b => b.on && !b.ai)).filter(b => b.n && !AI.busy.has(b));
+  const todo = (list || bursts.filter(pendienteIA)).filter(b => b.n && !AI.busy.has(b));
   if (!todo.length) { updateAIBar(); return; }
   const apt = $('#apt').value.trim().toUpperCase();
   const queue = [...todo];
@@ -373,14 +405,17 @@ function terminarRonda() {
 function refresh(b) { if (bursts.includes(b)) renderBurst(b); }
 function renderStat() {
   const sim = bursts.filter(b => b.similar).length;
-  $('#addStat').textContent = `${bursts.reduce((a, b) => a + b.frames.length, 0)} archivos · ${bursts.length} ráfagas · ${folder}` + (sim ? ` · ${sim} ${sim === 1 ? 'parece' : 'parecen'} el mismo avión que la anterior (revisa «Unir con la anterior»)` : '');
+  $('#addStat').textContent = `${bursts.reduce((a, b) => a + b.frames.length, 0)} fotos · ${bursts.length} ráfagas · ${folder}`
+    + (paresJpg ? ` · ${paresJpg} JPG de RAW+JPG contados una vez` : '') + (sim ? ` · ${sim} ${sim === 1 ? 'parece' : 'parecen'} el mismo avión que la anterior (revisa «Unir con la anterior»)` : '');
 }
 function applyAI(b, r) {
   // Segunda pasada tras unir (con la mejor foto y la segunda): si lee peor que la primera, se queda la primera
   const repaso = b.enRepaso; delete b.enRepaso;
   if (repaso && b.ai?.hay_avion && valorIA(r) < valorIA(b.ai)) { aplicarEntero(b, r); return; }
   b.ai = r;
-  if (!r.hay_avion) { if (!b.touched.on) b.on = false; return; }
+  if (!r.hay_avion) { if (!b.touched.on) { b.on = false; b.offPor = 'ia'; } return; }
+  // la web la había desmarcado (toma suelta), pero la IA ve un avión: se guarda (todo avión fotografiado cuenta)
+  if (!b.on && b.offPor && b.offPor !== 'ia' && !b.touched.on) { b.on = true; b.offPor = ''; }
   aplicarEntero(b, r);
   const extra = [r.codigo, r.librea].filter(Boolean).join(' · ');
   const reg = r.matricula ? r.matricula + (extra ? `(${extra})` : '') : '';
@@ -508,7 +543,7 @@ function otherBanner(b) {
 function updateAIBar() {
   if (!bursts.length) { $('#aiBar').hidden = true; return; }
   const ided = bursts.filter(b => b.ai).length, busy = AI.busy.size;
-  const missing = bursts.filter(b => b.on && b.n && !b.ai && !AI.busy.has(b)).length;
+  const missing = bursts.filter(b => pendienteIA(b) && !AI.busy.has(b)).length;
   const dups = bursts.filter(b => b.dupOf !== undefined).length;
   const low = bursts.filter(b => b.on && b.ai && b.ai.hay_avion && (b.ai.confianza === 'baja' || !b.ai.matricula)).length;
   let t = !aiOn() && !ided ? 'Identificación con IA desactivada.'
@@ -651,6 +686,7 @@ function cruzarADSB() {
       const r = decidir(b, candidatos(b, datos, cal, tz), datos);
       b.adsb = resumir(r, b, tz, cal);
       if (r.estado === 'propuesta') proponer(b, r.c); else if (!regPropia(b)) quitarPropuesta(b);
+      else tipoDeADSB(b, r);
     }
     if (antes !== JSON.stringify(b.adsb || null) + b.reg + b.type) { cambios++; refresh(b); }
   }
@@ -669,6 +705,14 @@ function proponer(b, c) {
   if (b.touched.reg || (b.reg && b.reg !== b.regAdsb)) return;
   b.reg = c.reg; b.regAdsb = c.reg;
   if (!b.touched.type && c.tipo && (!b.type || b.type === b.tipoAdsb || familia(b.type) === familia(c.tipo))) { b.type = c.tipo; b.tipoAdsb = c.tipo; }
+}
+// La matrícula está en el ADS-B a la hora de la foto: su tipo (de la base de datos de adsb.lol) manda sobre el que
+// dedujo la IA mirando la foto, salvo que lo hayas escrito tú. Si deja de estar confirmada, vuelve el de la IA.
+function tipoDeADSB(b, r) {
+  if (b.touched.type) return;
+  const t = r.estado === 'confirmada' ? r.c?.tipo : '';
+  if (t) { if (b.type !== t) { b.type = t; b.tipoAdsb = t; } }
+  else if (b.tipoAdsb && b.type === b.tipoAdsb) { b.type = b.ai?.tipo_icao || ''; b.tipoAdsb = ''; }
 }
 function quitarPropuesta(b) {
   if (b.regAdsb && b.reg === b.regAdsb && !b.touched.reg) b.reg = '';
@@ -733,7 +777,8 @@ function notaDe(b) {
   if (r && r.hay_avion) {
     if (!r.matricula) rev.push(r.matricula_parcial ? 'matrícula parcial ' + r.matricula_parcial : r.codigo ? 'serial no legible (código ' + r.codigo + ')' : 'matrícula no legible');
     if (r.confianza === 'baja') rev.push('IA con confianza baja');
-    if (r.matricula && r.verificado !== true) rev.push('tipo sin verificar con la ficha de la matrícula');
+    if (r.matricula && r.verificado !== true) rev.push('tipo sin verificar con la ficha de la matrícula' + (r.fallo_ficha ? ` (${r.fallo_ficha})` : ''));
+    if (r.tipo_dudoso) rev.push('el tipo ICAO no cuadra con el avión que describe la IA');
     if (r.otro_avion_en?.length) rev.push('puede haber otro avión en la ráfaga');
     if (r.para && r.para !== b.n) rev.push('la IA miró otra foto de la ráfaga');
     if (b.touched.reg && r.matricula && claveReg(r.matricula) !== claveReg(b.reg)) rev.push('la IA leyó ' + r.matricula);

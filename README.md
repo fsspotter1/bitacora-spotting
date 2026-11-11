@@ -97,3 +97,19 @@ Sin esas claves la web funciona igual que la v0.2 y la barra del ADS-B dice que 
 
 Prueba manual del procesado: GitHub → Actions → «ADS-B día» → Run workflow (fecha `2026-11-10`, aeropuertos `LEVC`).
 En local: `python3 scripts/adsb_dia.py 2026-11-10 LEVC --salida out/` (sin subir nada).
+
+## v0.3.1 · Tipo ICAO fiable y tomas sueltas
+- *Tipo coherente con el avión*: la IA escribe primero el fabricante y modelo que ve (`aeronave`) y después su designador.
+  El servidor lo comprueba con la tabla ICAO (`data/tipos_icao.json` + `lib/tipos.js`): si el código es de otro avión
+  (p. ej. SC7, el Short Skyvan, para un «Cessna 408 SkyCourier»), lo corrige (C408) o, si no está claro, lo marca para revisar.
+- *Ficha de la matrícula*: primero se consulta [adsbdb](https://www.adsbdb.com) (base abierta, sin IA ni coste, al
+  momento); si no conoce la matrícula, se siguen leyendo JetPhotos, airport-data y Planespotters con la IA. Si no hay
+  ficha, la nota dice por qué (p. ej. «no está en adsbdb y las webs no dejaron leer la ficha (url_not_allowed)»).
+- *ADS-B*: si la matrícula está confirmada a la hora de la foto, el tipo sale de la base de datos de adsb.lol.
+- *Tomas sueltas*: con poca luz el detector del navegador a veces no ve el avión y la ráfaga se desmarcaba como «toma
+  suelta», así que la IA ni la miraba. Ahora la IA también revisa esas tomas y, si ve un avión, la marca para guardar.
+  Las que desmarcas tú no se tocan. La tarjeta dice siempre por qué está desmarcada.
+- *RAW+JPG*: el NEF y el JPG de la misma foto (mismo nombre y hora) cuentan como una sola toma (se usa el RAW).
+
+`data/tipos_icao.json` (designador → fabricante y modelo) sale de `webapp/src/db/types.json` de
+[Mictronics/readsb-protobuf](https://github.com/Mictronics/readsb-protobuf) (GPL v3), que recoge el Doc 8643 de la OACI.

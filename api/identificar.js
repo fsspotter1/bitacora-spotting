@@ -13,6 +13,8 @@
 //   (Gemini: AI_MODEL, por defecto gemini-2.5-flash)
 //   AI_LIMITE_DIA       ráfagas por usuario y día (opcional; por defecto 400)
 
+const { revisarTipo, coincideConFoto, buscarTipo, esTipo } = require('../lib/tipos.js');
+
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_lXi2rPoZx8ofeM46jqwBlA_PaSQ2JSX'; // clave pública (la misma que la web)
 const MAX_IMG = 900 * 1024; // bytes por imagen en base64
@@ -25,7 +27,10 @@ const ESQUEMA = {
     codigo: { type: 'string', description: 'Solo militares: código o indicativo de unidad pintado en grande (p. ej. 15-30 en el morro de un F-18 español, 31-21, 4-12, 118-AT); vacío si no hay' },
     matricula_parcial: { type: 'string', description: 'Los caracteres que sí se leen, p. ej. "D-AI?I" o "…XI" de la compuerta del tren; vacío si no se lee nada' },
     donde_se_lee: { type: 'string', description: 'fuselaje, cola, compuerta del tren delantero, ala, motor, nombre en el morro… o "no se lee"' },
-    tipo_icao: { type: 'string', description: 'Designador ICAO del tipo (A20N, B738, B77W, A359, E195, C17…), vacío si no se puede saber' },
+    // aeronave va ANTES que tipo_icao: la IA escribe primero qué avión ve y luego su designador (así no pone un código
+    // de otro avión, como SC7 —Short Skyvan— para un Cessna 408 SkyCourier)
+    aeronave: { type: 'string', description: 'Fabricante y modelo que reconoces, p. ej. "Airbus A320neo", "Boeing 737-800", "Cessna 408 SkyCourier", "Embraer E195-E2"; vacío si no se sabe' },
+    tipo_icao: { type: 'string', description: 'Designador ICAO oficial (Doc 8643) de ESE modelo, no una abreviatura del nombre (A20N, B738, B77W, A359, E295, C408, C17…); vacío si no se puede saber' },
     operador: { type: 'string', description: 'Aerolínea u operador según la librea (Iberia, Ryanair, Privado, USAF…), vacío si no se sabe' },
     librea: { type: 'string', description: 'Solo si es una librea especial o retro (Retro, Star Alliance, OneWorld, SkyTeam, un aniversario…); si no, vacío' },
     confianza: { type: 'string', enum: ['alta', 'media', 'baja'], description: 'alta = matrícula legible entera y tipo seguro; media = algo deducido; baja = poco fiable' },
@@ -41,7 +46,7 @@ const ESQUEMA = {
     },
     motivo: { type: 'string', description: 'Explicación breve en español (máx. 20 palabras): qué se lee y qué dudas hay' },
   },
-  required: ['hay_avion', 'matricula', 'matricula_parcial', 'donde_se_lee', 'codigo', 'tipo_icao', 'operador', 'librea', 'confianza', 'varios_aviones', 'avion_entero', 'otras_tomas', 'hoja', 'motivo'],
+  required: ['hay_avion', 'matricula', 'matricula_parcial', 'donde_se_lee', 'codigo', 'aeronave', 'tipo_icao', 'operador', 'librea', 'confianza', 'varios_aviones', 'avion_entero', 'otras_tomas', 'hoja', 'motivo'],
   additionalProperties: false,
 };
 
@@ -72,9 +77,11 @@ function instrucciones({ aeropuerto, fecha, nExtra, nRecortes = 1, nHoja = 0, nI
     '- Mira también la compuerta del tren delantero: muchas aerolíneas pintan ahí las últimas 2-3 letras (p. ej. "XI" → D-AIXI). Iberia no las lleva, pero pinta el nombre del avión en el morro.',
     '- Formato de matrícula: con guion cuando lo lleva (EC-MXV, D-AIXI, 9H-ABC); EE. UU. sin guion (N123AB). Militares y gobierno: el serial oficial tal como está pintado (08-8200, A-1102, 330002, C.15-72, T.22-1), sin punto final.',
     '- Militares: NO confundas el serial con el código de unidad. El número grande del morro o la deriva suele ser el código de unidad (España: 15-30, 12-50, 31-21 = ala/escuadrón + número; Italia: 4-12; Francia: 118-AT) y va en "codigo". El serial oficial suele ir pequeño en la deriva o el fuselaje trasero (España: C.15-72, T.21-03; Italia: MM7062; Francia: el número de construcción). Si el serial no se lee, matricula vacía y confianza baja, aunque el código se lea perfectamente.',
-    '- tipo_icao: el designador ICAO exacto de la variante solo si se distingue claramente (cuenta ventanillas, motores, winglets…) (A20N vs A320 por los motores y sharklets, B38M vs B738, A359 vs A35K, B77W vs B772…). Si dudas entre variantes, pon la más probable y dilo en motivo.',
+    '- aeronave y tipo_icao: primero escribe en aeronave el fabricante y modelo que reconoces (lee también lo que lleve pintado: «SkyCourier», «Dreamliner», «neo»…). Después pon en tipo_icao el designador ICAO oficial de ESE modelo (Doc 8643), que no es una abreviatura del nombre: Cessna 408 SkyCourier = C408 (SC7 es el Short Skyvan), Embraer E195-E2 = E295, A320neo = A20N, 737 MAX 8 = B38M, ATR 72-600 = AT76, Dash 8-400 = DH8D. Los dos campos tienen que ser el mismo avión.',
+    '- tipo_icao: la variante exacta solo si se distingue claramente (cuenta ventanillas, motores, winglets…) (A20N vs A320 por los motores y sharklets, B38M vs B738, A359 vs A35K, B77W vs B772…). Si dudas entre variantes, pon la más probable y dilo en motivo.',
     '- operador: el nombre comercial habitual (Iberia, Air Europa, Lufthansa, easyJet, Ryanair, Qatar Airways…). Aviones privados o ejecutivos sin aerolínea: "Privado".',
     '- confianza "baja" si la foto es nocturna, de frente, de cola, el avión está lejos o tapado, o si la matrícula no se lee.',
+    '- motivo: texto plano, sin HTML ni saltos de línea.',
     'Responde solo con el JSON pedido.',
   ].filter(Boolean).join('\n');
 }
@@ -205,33 +212,80 @@ async function llamarClaude(cuerpo) {
   }
 }
 
+// Saca el JSON de la respuesta aunque la IA escriba algo antes o después
+function extraerJson(txt) {
+  const fin = txt.lastIndexOf('}');
+  for (let i = txt.lastIndexOf('{', fin); i >= 0; i = txt.lastIndexOf('{', i - 1)) {
+    try { const o = JSON.parse(txt.slice(i, fin + 1)); if (o && typeof o === 'object' && 'encontrado' in o) return o; } catch { /* sigue buscando */ }
+    if (i === 0) break;
+  }
+  return null;
+}
+
+// Devuelve { ver } con la ficha o { ver: null, fallo } con el motivo (para que la web lo diga, en vez de «no respondió»)
 async function verificarMatricula(reg, visto, fecha) {
   const modelos = [...new Set([process.env.AI_MODEL_VERIF || 'claude-haiku-5-5', process.env.AI_MODEL || 'claude-sonnet-5-5'])];
   let ultimoError;
   for (const model of modelos) {   // si el modelo barato no admite la herramienta, se prueba con el principal
     try {
       const messages = [{ role: 'user', content: textoVerificacion(reg, visto, fecha) }];
+      const errores = [];
       let j;
       for (let vuelta = 0; vuelta < 4; vuelta++) {
         j = await llamarClaude({
           model, max_tokens: 1200, messages,
           tools: [{ type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 3, allowed_domains: WEBS_VERIF, max_content_tokens: 6000 }],
         });
+        for (const c of j.content || []) {   // páginas que no se pudieron abrir (robots.txt, bloqueo, 403…)
+          if (c.type === 'web_fetch_tool_result' && /error/.test(c.content?.type || '')) errores.push(c.content.error_code || 'error');
+        }
         if (j.stop_reason !== 'pause_turn') break;
         messages.push({ role: 'assistant', content: j.content });   // turno largo: se continúa tal cual
       }
       const txt = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
-      const m = txt.match(/\{[\s\S]*\}/);
-      if (!m) return null;
-      const o = JSON.parse(m[0]);
-      return { ...o, _uso: j.usage, _modelo: model };
+      const o = extraerJson(txt);
+      if (o) return { ver: { ...o, _uso: j.usage, _modelo: model } };
+      console.error('verificar sin JSON:', reg, errores, txt.slice(0, 300));
+      const motivos = [...new Set(errores)].join(', ');
+      return { ver: null, fallo: errores.length ? `JetPhotos, airport-data y Planespotters no dejaron leer la ficha (${motivos})` : 'la IA no devolvió la ficha' };
     } catch (e) {
       ultimoError = e;
       if (e.status !== 400) break;   // solo se reintenta con otro modelo si la petición no era válida para este
     }
   }
   console.error('verificar:', ultimoError);
-  return null;
+  return { ver: null, fallo: 'la consulta de la ficha falló: ' + String(ultimoError?.message || ultimoError).slice(0, 120) };
+}
+
+// ---------- v0.3.1 · ficha en adsbdb (base de datos abierta de aviones; sin IA, sin coste) ----------
+// https://www.adsbdb.com · datos de PlaneBase. Se consulta antes que las webs: es inmediato y no bloquea lecturas.
+// Devuelve null si no responde, { encontrado: false } si no conoce la matrícula, o la ficha.
+async function fichaAdsbdb(reg, visto) {
+  let r;
+  try {
+    r = await fetch(`https://api.adsbdb.com/v0/aircraft/${encodeURIComponent(reg)}`, {
+      headers: { accept: 'application/json', 'user-agent': 'bitacora-spotting (github.com/Fsspotter1/bitacora-spotting)' },
+      signal: AbortSignal.timeout(6000),
+    });
+  } catch (e) { console.error('adsbdb:', e.message); return null; }
+  if (r.status === 404) return { encontrado: false };
+  if (!r.ok) { console.error('adsbdb:', r.status); return null; }
+  const a = (await r.json().catch(() => null))?.response?.aircraft;
+  if (!a || typeof a !== 'object') return { encontrado: false };
+  const s = x => String(x ?? '').trim();
+  // si el registro de adsbdb es de otra matrícula (no debería), no vale
+  if (s(a.registration) && s(a.registration).replace(/[^A-Z0-9]/gi, '').toUpperCase() !== reg.replace(/[^A-Z0-9]/g, '')) return { encontrado: false };
+  const modelo = [s(a.manufacturer), s(a.type)].filter(Boolean).join(' ');
+  let tipo = s(a.icao_type).toUpperCase().replace(/\s+/g, '');
+  if (!tipo || !esTipo(tipo)) tipo = buscarTipo(modelo) || tipo;
+  if (!tipo && !modelo) return { encontrado: false };
+  const dueno = [s(a.registered_owner), s(a.registered_owner_country_name)].filter(Boolean).join(', ');
+  return {
+    encontrado: true, modelo, tipo_icao: tipo, operador: '',   // el propietario registrado no es el operador: manda la librea
+    coincide_con_foto: coincideConFoto(tipo, modelo, visto),
+    fuente: `https://api.adsbdb.com/v0/aircraft/${encodeURIComponent(reg)}`, origen: 'adsbdb.com',
+    nota: dueno ? ('Propietario: ' + dueno).slice(0, 90) : '',
+  };
 }
 
 // Mezcla lo visto en la foto con lo que dicen las fichas
@@ -250,7 +304,7 @@ function aplicarVerificacion(v, ver) {
     ...v,
     tipo_icao: tipo || v.tipo_icao,
     operador: s(ver.operador) || v.operador,
-    modelo: s(ver.modelo),
+    modelo_ficha: s(ver.modelo),
     verificado: true,
     fuente: s(ver.fuente),
     confianza: v.confianza === 'baja' ? 'media' : 'alta',
@@ -278,6 +332,8 @@ async function conGemini(imagenes, texto, modelo) {
   return { ...JSON.parse(txt), _uso: j.usageMetadata };
 }
 
+const sinHtml = t => String(t ?? '').replace(/<\/?[a-z][^>]{0,40}>/gi, ' ').replace(/\s+/g, ' ').trim();   // p. ej. un «</br>» al final
+
 function limpiar(o, nExtra) {
   const s = v => String(v ?? '').trim();
   let reg = s(o.matricula).toUpperCase().replace(/\s+/g, '').replace(/\.$/, '');
@@ -288,6 +344,7 @@ function limpiar(o, nExtra) {
     matricula_parcial: s(o.matricula_parcial).toUpperCase(),
     donde_se_lee: s(o.donde_se_lee),
     codigo: s(o.codigo).toUpperCase(),
+    aeronave: sinHtml(o.aeronave).slice(0, 80),
     tipo_icao: s(o.tipo_icao).toUpperCase().replace(/\s+/g, ''),
     operador: s(o.operador),
     librea: s(o.librea),
@@ -297,7 +354,7 @@ function limpiar(o, nExtra) {
     otras_tomas: (Array.isArray(o.otras_tomas) ? o.otras_tomas : []).filter(t => Number.isInteger(t?.i) && t.i >= 0 && t.i < nExtra)
       .map(t => ({ i: t.i, mismo_avion: t.mismo_avion !== false, entero: typeof t.entero === 'boolean' ? t.entero : null })),
     hoja: (Array.isArray(o.hoja) ? o.hoja : []).filter(t => Number.isInteger(t?.n) && typeof t.entero === 'boolean').map(t => ({ n: t.n, entero: t.entero })),
-    motivo: s(o.motivo).slice(0, 300),
+    motivo: sinHtml(o.motivo).slice(0, 300),
   };
 }
 
@@ -314,18 +371,28 @@ module.exports = async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = null; } }
 
-  // Modo ficha: la web ya tiene la matrícula leída y solo pide sus datos en internet (una vez por matrícula y sesión).
+  // Modo ficha: la web ya tiene la matrícula leída y solo pide sus datos (una vez por matrícula y sesión).
+  // 1.º adsbdb (gratis e inmediato); si no la conoce o no responde, 2.º las webs de fichas leídas por la IA.
   if (body?.ficha) {
     const f = body.ficha, reg = String(f.matricula || '').toUpperCase().replace(/\s+/g, '');
     if (!/^[A-Z0-9.-]{3,12}$/.test(reg)) return res.status(400).json({ error: 'matricula', mensaje: 'Matrícula no válida.' });
-    if (proveedor !== 'anthropic' && !process.env.ANTHROPIC_API_KEY) return res.status(200).json({ ver: null });
-    if (process.env.AI_VERIFICAR === '0') return res.status(200).json({ ver: null });
-    const visto = { tipo_icao: String(f.tipo_icao || '').slice(0, 8), operador: String(f.operador || '').slice(0, 60), motivo: String(f.motivo || '').slice(0, 300) };
-    const ver = await verificarMatricula(reg, visto, String(body.fecha || '').slice(0, 10));
-    if (!ver) return res.status(200).json({ ver: null });
+    if (process.env.AI_VERIFICAR === '0') return res.status(200).json({ ver: null, fallo: 'la verificación está desactivada en el servidor' });
+    const visto = { tipo_icao: String(f.tipo_icao || '').slice(0, 8).toUpperCase(), aeronave: String(f.aeronave || '').slice(0, 80),
+      operador: String(f.operador || '').slice(0, 60), motivo: String(f.motivo || '').slice(0, 300) };
+    const fallos = [];
+    let ver = await fichaAdsbdb(reg, visto);
+    if (!ver) fallos.push('adsbdb no respondió');
+    else if (!ver.encontrado) fallos.push(`${reg} no está en adsbdb`);
+    if (!ver?.encontrado && process.env.ANTHROPIC_API_KEY) {
+      const w = await verificarMatricula(reg, visto, String(body.fecha || '').slice(0, 10));
+      if (w.ver) ver = w.ver; else fallos.push(w.fallo);
+    }
+    // sin ficha en ningún sitio: si adsbdb respondió que no la conoce y las webs tampoco la tienen, es «sin ficha»;
+    // si algo falló por el camino, se dice qué
+    if (!ver || (!ver.encontrado && fallos.length > 1)) return res.status(200).json({ ver: null, fallo: fallos.join(' y ') });
     const s = x => String(x ?? '').trim().slice(0, 200);
     return res.status(200).json({ ver: { encontrado: !!ver.encontrado, coincide_con_foto: ver.coincide_con_foto !== false, modelo: s(ver.modelo),
-      tipo_icao: s(ver.tipo_icao).toUpperCase().replace(/\s+/g, ''), operador: s(ver.operador), fuente: s(ver.fuente), nota: s(ver.nota) } });
+      tipo_icao: s(ver.tipo_icao).toUpperCase().replace(/\s+/g, ''), operador: s(ver.operador), fuente: s(ver.fuente), origen: s(ver.origen), nota: s(ver.nota) } });
   }
 
   const imgs = Array.isArray(body?.imagenes) ? body.imagenes.filter(x => typeof x === 'string') : [];
@@ -350,11 +417,11 @@ module.exports = async function handler(req, res) {
     const crudo = proveedor === 'gemini' ? await conGemini(imgs, texto, process.env.AI_MODEL)
       : body.comparar === true ? await compararModelos(imgs, texto)
       : await leerConClaude(imgs, texto);
-    let v = { ...limpiar(crudo, nExtra), modelo: crudo._modelo || 'Gemini', revisado: !!crudo._revisado };
+    let v = { ...revisarTipo(limpiar(crudo, nExtra)), modelo: crudo._modelo || 'Gemini', revisado: !!crudo._revisado };
     if (crudo._comparacion) v.comparacion = crudo._comparacion;
     // Verificación en línea solo para clientes antiguos; la web actual manda verificar:false y pide la ficha aparte.
     if (body.verificar !== false && process.env.ANTHROPIC_API_KEY && process.env.AI_VERIFICAR !== '0' && v.hay_avion && /^[A-Z0-9.-]{3,12}$/.test(v.matricula)) {
-      v = aplicarVerificacion(v, await verificarMatricula(v.matricula, v, String(body.fecha || '').slice(0, 10)));
+      v = aplicarVerificacion(v, (await verificarMatricula(v.matricula, v, String(body.fecha || '').slice(0, 10))).ver);
     }
     return res.status(200).json({ ...v, proveedor, usado_hoy: uso.usado, limite });
   } catch (e) {

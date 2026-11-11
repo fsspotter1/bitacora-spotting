@@ -302,6 +302,8 @@ export function pickBest(b) {
   // Toma suelta (1–2 fotos sin ninguna limpia, o con el avión diminuto): casi siempre un disparo
   // sin finalidad o el arranque de la ráfaga; se desmarca para no guardarla salvo que el usuario quiera
   b.loose = ok.length <= 2 && (best.fill < 0.12 || ok.every(f => f.found === false));
+  // por qué: el detector no ve ningún avión (de noche o con poca luz falla mucho: la IA lo comprueba) o el avión es diminuto
+  b.suelta = !b.loose ? '' : ok.every(f => f.found === false) ? 'sin_avion' : 'diminuto';
 }
 
 // Parte una ráfaga donde cambia el avión (huella distinta de las últimas tomas y que se mantiene en las siguientes).

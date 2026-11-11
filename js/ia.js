@@ -101,7 +101,7 @@ export function fichasDeBitacora(entries) {
   for (const e of entries || []) {
     const k = claveReg(e.matricula);
     if (!k || !e.tipo || e.pendiente || fichas.has(k)) continue;
-    fichas.set(k, Promise.resolve({ encontrado: true, coincide_con_foto: true, modelo: e.ia?.modelo || '', tipo_icao: e.tipo, operador: e.operador || '', fuente: '', origen: 'tu bitácora' }));
+    fichas.set(k, Promise.resolve({ encontrado: true, coincide_con_foto: true, modelo: e.ia?.modelo_ficha || e.ia?.aeronave || '', tipo_icao: e.tipo, operador: e.operador || '', fuente: '', origen: 'tu bitácora' }));
   }
 }
 
@@ -112,11 +112,12 @@ function pedirFicha(reg, visto, { token, fecha }) {
     const r = await fetch('/api/identificar', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ ficha: { matricula: reg, tipo_icao: visto.tipo_icao, operador: visto.operador, motivo: visto.motivo }, fecha }),
+      body: JSON.stringify({ ficha: { matricula: reg, tipo_icao: visto.tipo_icao, aeronave: visto.aeronave, operador: visto.operador, motivo: visto.motivo }, fecha }),
     });
     const j = await r.json().catch(() => null);
     if (!r.ok) throw new Error(j?.mensaje || `Error ${r.status}`);
-    return j?.ver || null;
+    if (!j?.ver) throw new Error(j?.fallo || 'la consulta de la ficha no respondió');   // el servidor dice por qué
+    return j.ver;
   })();
   fichas.set(k, p);
   p.then(v => { if (!v) fichas.delete(k); }, () => fichas.delete(k));   // si falla, se podrá reintentar
@@ -130,10 +131,10 @@ function aplicarFicha(v, ver, deMemoria) {
   const dominio = ver.origen || (() => { try { return new URL(s(ver.fuente)).hostname.replace(/^www\./, ''); } catch { return ''; } })();
   const memo = deMemoria && ver.origen !== 'tu bitácora' ? ' (ya buscada)' : '';
   if (!ver.encontrado) return { ...v, verificado: false, confianza: v.confianza === 'alta' ? 'media' : v.confianza,
-    motivo: (`⚠ Tipo según la foto: ${v.matricula} no tiene ficha en internet${memo}. ` + v.motivo).slice(0, 300) };
+    motivo: (`⚠ Tipo según la foto: ${v.matricula} no tiene ficha en internet${memo}. ` + v.motivo).slice(0, 450) };
   if (ver.coincide_con_foto === false) {
     return { ...v, verificado: false, confianza: 'baja', fuente: s(ver.fuente),
-      motivo: (`⚠ La ficha de ${v.matricula} dice ${s(ver.modelo)}, que no cuadra con la foto: revisa la matrícula. ` + v.motivo).slice(0, 300) };
+      motivo: (`⚠ La ficha de ${v.matricula} dice ${s(ver.modelo)}, que no cuadra con la foto: revisa la matrícula. ` + v.motivo).slice(0, 450) };
   }
   const tipo = s(ver.tipo_icao).toUpperCase().replace(/\s+/g, '');
   const cambio = tipo && tipo !== v.tipo_icao ? ` (la IA había dicho ${v.tipo_icao || '?'})` : '';
@@ -141,12 +142,13 @@ function aplicarFicha(v, ver, deMemoria) {
     ...v,
     tipo_icao: tipo || v.tipo_icao,
     operador: s(ver.operador) || v.operador,
-    modelo: s(ver.modelo),
+    modelo_ficha: s(ver.modelo),   // «modelo» es el modelo de IA que leyó la foto (Haiku/Sonnet): no se pisa
+    tipo_dudoso: false,
     verificado: true,
     verificado_de: ver.origen === 'tu bitácora' ? 'bitacora' : deMemoria ? 'memoria' : 'internet',
     fuente: s(ver.fuente),
     confianza: v.confianza === 'baja' ? 'media' : 'alta',
-    motivo: (`✓ ${s(ver.modelo) || tipo}${cambio}, según ${dominio || 'internet'}${memo}. ` + (s(ver.nota) && !deMemoria ? s(ver.nota) + ' ' : '') + '· ' + v.motivo).slice(0, 300),
+    motivo: (`✓ ${s(ver.modelo) || tipo}${cambio}, según ${dominio || 'internet'}${memo}. ` + (s(ver.nota) && !deMemoria ? s(ver.nota) + ' ' : '') + '· ' + v.motivo).slice(0, 450),
   };
 }
 
@@ -170,15 +172,15 @@ export async function identificar(b, { token, aeropuerto, fecha, comparar }) {
   (j.hoja || []).forEach(t => { if (hoja[t.n - 1]) j.entero[hoja[t.n - 1]] = t.entero; });
   // Ficha de la matrícula: de tu bitácora, de una búsqueda anterior de esta sesión o, si es nueva, de internet
   if (j.hay_avion && /^[A-Z0-9.-]{3,12}$/.test(j.matricula || '')) {
-    let fallo = 'no respondió';
+    let fallo = 'la consulta de la ficha no respondió';
     try {
       const { p, nueva } = pedirFicha(j.matricula, j, { token, fecha });
       const ver = await p;
       if (ver) return aplicarFicha(j, ver, !nueva);
     } catch (e) { fallo = e.message || fallo; }
     // Nunca dar por bueno el tipo supuesto en silencio: se marca para revisar y «Volver a identificar» lo reintenta
-    return { ...j, verificado: false, sin_verificar: true, confianza: j.confianza === 'alta' ? 'media' : j.confianza,
-      motivo: (`⚠ Tipo sin verificar (la consulta de la ficha ${fallo}); pulsa «Volver a identificar». ` + j.motivo).slice(0, 300) };
+    return { ...j, verificado: false, sin_verificar: true, fallo_ficha: fallo, confianza: j.confianza === 'alta' ? 'media' : j.confianza,
+      motivo: (`⚠ Tipo sin verificar con la ficha: ${fallo}. Pulsa «Volver a identificar» para reintentarlo. ` + j.motivo).slice(0, 450) };
   }
   return j;
 }
