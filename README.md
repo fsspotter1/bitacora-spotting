@@ -113,3 +113,28 @@ En local: `python3 scripts/adsb_dia.py 2026-11-10 LEVC --salida out/` (sin subir
 
 `data/tipos_icao.json` (designador → fabricante y modelo) sale de `webapp/src/db/types.json` de
 [Mictronics/readsb-protobuf](https://github.com/Mictronics/readsb-protobuf) (GPL v3), que recoge el Doc 8643 de la OACI.
+
+## v0.4 · Varios aeropuertos por carpeta (y aeropuerto automático)
+- *Tramos*: la carpeta se parte al cambiar de día o tras más de 2 h sin fotos. Cada tramo tiene su aeropuerto, que va a la
+  IA, al cruce con el ADS-B y a la entrada guardada. «Otro aeropuerto desde aquí» parte un tramo; «Unir con el tramo
+  anterior» los junta. El campo de arriba pasa a ser el aeropuerto *por defecto* (vacío = automático).
+- *Aeropuerto automático*: al procesar un día, el workflow saca también el **índice mundial de escalas**
+  (`TODO/AAAA-MM-DD.json.gz`, ~1,7 MB): para cada matrícula, en qué aeropuertos estuvo y de qué hora a qué hora (aterrizajes,
+  despegues y tiempo en tierra, aunque el aeropuerto no tenga cobertura en tierra). La web (`js/escalas.js`) busca el
+  aeropuerto donde estaban las matrículas de cada tramo a la hora de sus fotos. Como la hora de la cámara no se sabe de
+  antemano, prueba desfases de −12 h a +14 h: con una matrícula solo acepta la hora de casa o la local del aeropuerto
+  (± 1 h, por la hora de verano sin cambiar); con dos o más que coinciden, cualquiera. Primero pide los días de la hora de
+  casa ± 3 h; si algún tramo no aparece, todo el rango.
+- Si escribes un aeropuerto por defecto y el ADS-B sitúa un tramo en otro, no lo cambia: lo avisa con un botón «Usar …».
+- La hora de la cámara se calibra una vez para toda la carpeta, en UTC (sirve para un viaje con la cámara en hora de casa).
+- Un avión que aterriza y despega sin cobertura en tierra cuenta como aparcado entre medias (antes salía «sin rastro»).
+- Las ráfagas repetidas solo se unen dentro del mismo tramo: el mismo avión en otro aeropuerto es otra entrada.
+- Límites: historial desde el 10/03/2023; hace falta al menos una matrícula leída por tramo; sin cobertura ADS-B no hay escalas.
+- Nada que ejecutar en Supabase: el índice usa la misma tabla `adsb_dias` con el código especial `TODO`.
+- *Ráfagas sin ajuste manual*: desaparece «Otro avión si pasan más de … s». El primer corte sigue siendo por tiempo
+  (8 s sin fotos), porque el ADS-B necesita antes las matrículas de la IA para poner la cámara en hora. Con la cámara en
+  hora (2 aviones identificados), el ADS-B sabe qué avión pasaba por delante en cada momento (`delanteEn`, el que se
+  movía más cerca de la zona donde estaban los aviones identificados) y corrige el corte: junta ráfagas seguidas del
+  mismo avión (< 3 min, mismo tramo, sin matrículas ni tipos que lo contradigan) y separa una ráfaga si dos trozos
+  seguidos tenían delante aviones distintos y claros. No toca lo que unes o separas tú a mano. Sin ADS-B (antes de
+  marzo de 2023 o sin cobertura) siguen valiendo el detector de imagen y las matrículas de la IA.

@@ -1,6 +1,8 @@
 // v0.3 · Cruce con ADS-B. La web dice qué aeropuerto y qué días (hora de la cámara) tiene la carpeta; aquí se pasan a
 // días UTC con la zona horaria del aeropuerto, se apuntan en Supabase (pedir_adsb) y, si un día aún no está procesado,
 // se lanza el workflow de GitHub Actions que lo descarga de adsb.lol y lo filtra (.github/workflows/adsb.yml).
+// v0.4 · El código especial TODO pide el índice mundial de escalas de esos días (para detectar el aeropuerto de cada
+// tramo de fotos por sus matrículas): no tiene zona horaria, así que la web manda directamente los días UTC.
 //
 // Variables de entorno (Vercel → Settings → Environment Variables):
 //   GITHUB_TOKEN_ADSB   token de GitHub (fine-grained, solo este repositorio, permiso Actions: Read and write)
@@ -63,19 +65,20 @@ module.exports = async function handler(req, res) {
   let body = req.body;
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = null; } }
   const apt = String(body?.aeropuerto || '').toUpperCase().trim();
-  const info = AEROPUERTOS[apt];
+  const escalas = apt === 'TODO';
+  const info = escalas ? [null, null, null, ''] : AEROPUERTOS[apt];
   if (!/^[A-Z0-9]{4}$/.test(apt) || !info) return res.status(400).json({ error: 'aeropuerto', mensaje: `No conozco el aeropuerto «${apt}». Usa el código ICAO de 4 letras (LEVC, LEMD…).` });
   const [lat, lon, elev, tz] = info;
 
   // Días UTC: los que pide la web directamente, o los que cubren las horas de la cámara (± 30 min) en la zona del aeropuerto
   const fechas = new Set();
   for (const f of Array.isArray(body.fechas) ? body.fechas : []) if (/^\d{4}-\d{2}-\d{2}$/.test(f)) fechas.add(f);
-  for (const r of Array.isArray(body.rangos) ? body.rangos : []) {
+  for (const r of !escalas && Array.isArray(body.rangos) ? body.rangos : []) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(r?.dia) || !/^\d\d:\d\d$/.test(r.desde) || !/^\d\d:\d\d$/.test(r.hasta)) continue;
     const a = paredAUtc(Date.parse(`${r.dia}T${r.desde}:00Z`), tz) - 30 * 60000, b = paredAUtc(Date.parse(`${r.dia}T${r.hasta}:00Z`), tz) + 30 * 60000;
     for (let t = Date.parse(dia(a) + 'T00:00:00Z'); t <= b; t += 86400000) fechas.add(dia(t));
   }
-  const lista = [...fechas].sort().slice(0, 14);
+  const lista = [...fechas].sort().slice(0, escalas ? 21 : 14);
   const hoy = dia(Date.now());
   const estados = {}, mensajes = {};
   const base = { aeropuerto: apt, lat, lon, elev, tz, fechas: lista, estados, mensajes };

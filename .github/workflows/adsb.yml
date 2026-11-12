@@ -1,4 +1,5 @@
 # v0.3 · Procesa un día de ADS-B (adsb.lol) para los aeropuertos pedidos y lo guarda en Supabase.
+# v0.4 · En la misma pasada saca siempre el índice mundial de escalas del día (TODO): sirve para detectar el aeropuerto.
 # Lo lanza la web a través de /api/adsb. También se puede lanzar a mano: Actions → ADS-B día → Run workflow.
 name: ADS-B día
 
@@ -9,7 +10,7 @@ on:
         description: Día UTC (AAAA-MM-DD)
         required: true
       aeropuertos:
-        description: Códigos ICAO separados por comas (además se procesan los pendientes de ese día)
+        description: Códigos ICAO separados por comas, o TODO para solo el índice de escalas (además se procesan los pendientes de ese día)
         required: true
 
 permissions:

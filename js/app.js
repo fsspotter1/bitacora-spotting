@@ -2,7 +2,8 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 import { RAW_RE, readFrame, captureTime, analyse, pickBest, sceneDiff, splitByAircraft, DETECTAR_CORTES } from './raw.js';
 import { loadDetector, loadEmbedder } from './detect.js';
 import { identificar, claveReg, fichasDeBitacora } from './ia.js';
-import { rangosCamara, descargarDia, juntarDias, anclas, calibrar, candidatos, decidir, resumir, fechasUtc, regPropia, familia } from './adsb.js';
+import { rangosCamara, descargarDia, juntarDias, anclas, calibrar, candidatos, decidir, resumir, fechasUtc, regPropia, familia, paredDe, ADSB_DESDE, delanteEn } from './adsb.js';
+import { detectar, diasNecesarios, desfaseCasa, desfaseZona } from './escalas.js';
 
 const SUPABASE_URL = 'https://vhhpbulykxiqfwarxlfu.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_lXi2rPoZx8ofeM46jqwBlA_PaSQ2JSX'; // clave pública
@@ -170,7 +171,8 @@ $('#pick').onchange = async ev => {
   if (!files.length) { $('#addStat').textContent = 'No hay RAW en esa carpeta.'; return; }
   folder = (files[0].webkitRelativePath || '').split('/')[0] || '';
   bursts = []; $('#bursts').innerHTML = ''; $('#saveBar').hidden = true; $('#aiBar').hidden = true; $('#pickBtn').disabled = true; AI.stopped = '';
-  clearTimeout(ADSB.timer); Object.assign(ADSB, { fechas: [], estados: {}, mensajes: {}, datos: null, clave: '', cal: null, manual: null, error: '' }); $('#adsbBar').hidden = true;
+  clearTimeout(ADSB.timer); Object.assign(ADSB, { apts: new Map(), cal: null, manual: null, hDet: null, error: '' }); $('#adsbBar').hidden = true;
+  tramos = []; Object.assign(DET, { fase: 1, estadoTramo: new Map(), otraVez: false });
   const total = files.length; let done = 0; const frames = [];
   const prog = t => { $('#bar').style.width = (100 * done / total) + '%'; $('#addStat').textContent = t; };
   for (const f of files) {
@@ -180,7 +182,7 @@ $('#pick').onchange = async ev => {
   }
   frames.sort((a, b) => a.t - b.t || a.name.localeCompare(b.name));
   paresJpg = unirParesRawJpg(frames);
-  const gap = (+$('#gap').value || 8) * 1000; let cur = [];
+  const gap = HUECO_RAFAGA; let cur = [];
   frames.forEach((f, i) => { if (i && f.t - frames[i - 1].t > gap) { bursts.push({ frames: cur }); cur = []; } cur.push(f); });
   if (cur.length) bursts.push({ frames: cur });
   bursts.forEach(b => Object.assign(b, { reg: '', type: '', op: '', on: true, touched: {} }));
@@ -193,14 +195,14 @@ $('#pick').onchange = async ev => {
     // en el spot se dispara sin pausa a aviones seguidos: si cambia el avión, es otro registro
     const parts = splitByAircraft(b.frames);
     if (parts.length > 1) {
-      const nbs = parts.map((fr, k) => k ? { frames: fr, reg: '', type: '', op: '', on: true, auto: true, touched: {} } : Object.assign(b, { frames: fr }));
+      const nbs = parts.map((fr, k) => k ? { frames: fr, reg: '', type: '', op: '', on: true, auto: true, touched: {}, tramo: b.tramo } : Object.assign(b, { frames: fr }));
       bursts.splice(bi, 1, ...nbs); renumber(); splits += parts.length - 1;
       nbs.forEach(x => { pickBest(x); desmarcarSuelta(x); });
       bi += nbs.length - 1; $('#bursts').innerHTML = ''; bursts.slice(0, bi + 1).forEach(renderBurst);
     } else { pickBest(b); desmarcarSuelta(b); renderBurst(b); }
     prog(`Analizando ${done}/${total} · ráfaga ${bi + 1}/${bursts.length}` + (splits ? ` · ${splits} separadas por cambio de avión` : ''));
   }
-  markSimilar(); renderAll();
+  calcularTramos(); markSimilar(); renderAll();
   $('#bar').style.width = '100%';
   $('#pickBtn').disabled = false; $('#saveBar').hidden = false; updateSave();
   AI.stopped = ''; updateAIBar();
@@ -208,6 +210,9 @@ $('#pick').onchange = async ev => {
   iniciarADSB();
 };
 function renumber() { bursts.forEach((b, i) => b.id = i); }
+// Primer corte de ráfagas: más de 8 s sin fotos = otro avión. Antes era un ajuste; ahora lo corrige solo el ADS-B
+// (reagruparADSB) en cuanto la cámara está en hora: junta las del mismo avión y separa las que tienen dos.
+const HUECO_RAFAGA = 8000;
 // Con RAW+JPG, la cámara guarda la misma foto dos veces (FSS_2195.NEF y FSS_2195.JPG, a la misma hora): se queda una
 // sola toma, el RAW (o el JPG si el RAW no se pudo leer). Mismo nombre a otra hora (contador reiniciado) = otra foto.
 // Cambia la lista en su sitio (ordenada por hora) y devuelve cuántas copias se quitaron.
@@ -241,9 +246,16 @@ function markSimilar() {
   });
 }
 function renderAll() {
-  $('#bursts').innerHTML = ''; bursts.forEach(renderBurst); renderStat();
+  $('#bursts').innerHTML = '';
+  let ultimo, n = 0;
+  for (const b of bursts) {
+    if (tramos.length && b.tramo !== ultimo) { ultimo = b.tramo; const t = tramoDe(b); if (t) $('#bursts').insertAdjacentHTML('beforeend', cabeceraTramo(t, ++n)); }
+    renderBurst(b);
+  }
+  renderStat();
 }
-function mergeWithPrev(i) { mergeBursts(i - 1, i); }
+// Unir a mano: si la había separado el ADS-B, ya no la vuelve a separar
+function mergeWithPrev(i) { const p = bursts[i - 1]; if (p) p.sinCortesADSB = true; mergeBursts(i - 1, i); }
 const RANGO = { alta: 3, media: 2, baja: 1 };
 const valorIA = a => a ? (a.matricula ? 10 : 0) + (a.matricula_parcial ? 2 : 0) + (a.verificado ? 5 : 0) + (RANGO[a.confianza] || 0) : -1;
 // Une la ráfaga j con la i (no hace falta que sean seguidas: p. ej. el que rodaba, uno que aterriza y otra vez el que rodaba)
@@ -261,13 +273,17 @@ function mergeBursts(i, j, quiet) {
   renderAll(); updateSave(); updateAIBar();
   document.getElementById('b' + p.id)?.scrollIntoView({ block: 'nearest' });
 }
-function splitAt(i, name) {
+// porADSB: { delante } si la separa el ADS-B (se dice en la tarjeta); si no, la separas tú y no se vuelve a juntar sola
+function splitAt(i, name, porADSB) {
   const b = bursts[i]; const k = b.frames.findIndex(f => f.name === name); if (k <= 0) return;
-  const nb = { frames: b.frames.slice(k), reg: '', type: '', op: '', on: true, auto: false, touched: {} };
+  const nb = { frames: b.frames.slice(k), reg: '', type: '', op: '', on: true, auto: porADSB ? 'adsb' : false, delante: porADSB?.delante || '', mano: !porADSB, touched: {}, tramo: b.tramo };
   // la identificación era de la ráfaga entera: se repite para las dos partes
-  b.ai = null; b.aiErr = ''; ['reg', 'type', 'op'].forEach(kk => { if (!b.touched?.[kk]) b[kk] = ''; });
+  b.ai = null; b.aiErr = ''; b.adsb = null; ['reg', 'type', 'op'].forEach(kk => { if (!b.touched?.[kk]) b[kk] = ''; });
+  b.regAdsb = ''; b.tipoAdsb = '';
   b.frames = b.frames.slice(0, k); pickBest(b); pickBest(nb); delete b.view;
-  bursts.splice(i + 1, 0, nb); renumber(); markSimilar(); markDups(); renderAll(); updateSave();
+  bursts.splice(i + 1, 0, nb); renumber();
+  if (porADSB) return [b, nb];
+  markSimilar(); markDups(); renderAll(); updateSave();
   if (aiOn()) runAI([b, nb]);
 }
 const hm = t => new Date(t).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -296,10 +312,12 @@ function renderBurst(b) {
     </div>
     <div class="meta">
       ${b.similar ? `<div class="similar"><span>Parece el mismo avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Unir con la anterior</button></div>` : ''}
-      ${b.auto ? '<div class="similar"><span>Separada automáticamente: parece otro avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Es el mismo: unir</button></div>' : ''}
+      ${b.auto === 'adsb' ? `<div class="similar"><span>Separada con el ADS-B: a esa hora pasaba otro avión por delante${b.delante ? ` (${esc(b.delante)})` : ''}.</span><button class="btn sm" data-act="merge">Es el mismo: unir</button></div>`
+        : b.auto ? '<div class="similar"><span>Separada automáticamente: parece otro avión que la ráfaga anterior.</span><button class="btn sm" data-act="merge">Es el mismo: unir</button></div>' : ''}
       ${avisoDesmarcada(b) ? `<p class="warnline">${avisoDesmarcada(b)}</p>` : b.warn ? `<p class="warnline">⚠ ${esc(b.warn)}: revisa la ráfaga.</p>` : ''}
       <div class="row"><span class="time">${hm(b.frames[0].t)}</span><span class="files">${esc(base(b.frames[0].name))} – ${esc(base(b.frames[k - 1].name))} · ${k} ${k === 1 ? 'foto' : 'fotos'}</span>
-        ${b.id > 0 && !b.similar && !b.auto ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}</div>
+        ${b.id > 0 && !b.similar && !b.auto ? '<button class="btn sm ghost" data-act="merge">Unir con la anterior</button>' : ''}
+        ${tramos.length && bursts.find(x => x.tramo === b.tramo) !== b ? '<button class="btn sm ghost" data-act="tramo" title="Esta ráfaga y las siguientes de su tramo pasan a un tramo nuevo con otro aeropuerto">Otro aeropuerto desde aquí</button>' : ''}</div>
       ${dupBanner(b)}${otherBanner(b)}
       <div class="inputs">
         <input type="text" class="reg${byAI(b, 'reg')}${byADSB(b, 'reg')}" data-k="reg" placeholder="Matrícula" value="${esc(b.reg)}" aria-label="Matrícula">
@@ -318,7 +336,7 @@ function renderBurst(b) {
       b.touched[kk] = true; if (kk !== 'on') i.classList.remove('byai');
       if (kk === 'on') el.classList.toggle('off', !b.on); updateSave();
     };
-    i.onchange = () => { i.oninput(); if (i.dataset.k === 'reg' || i.dataset.k === 'type') { if (i.dataset.k === 'reg') b.regAdsb = ''; markSimilar(); markDups(); renderAll(); updateAIBar(); programarCruce(); } };
+    i.onchange = () => { i.oninput(); if (i.dataset.k === 'reg' || i.dataset.k === 'type') { if (i.dataset.k === 'reg') { b.regAdsb = ''; programarDeteccion(); } markSimilar(); markDups(); renderAll(); updateAIBar(); programarCruce(); } };
   });
 }
 $('#bursts').addEventListener('click', e => {
@@ -334,6 +352,7 @@ $('#bursts').addEventListener('click', e => {
   else if (a.dataset.act === 'merge') return mergeWithPrev(b.id);
   else if (a.dataset.act === 'split') return splitAt(b.id, view);
   else if (a.dataset.act === 'ai') return runAI([b], true);
+  else if (a.dataset.act === 'tramo') return otroAeropuertoDesde(b);
   else if (a.dataset.act === 'mergedup') { const t = bursts.find(x => x.id === b.dupOf); if (t) mergeBursts(t.id, b.id); return; }
   else if (a.dataset.act === 'adsbusar') return usarADSB(b, a.dataset.reg, a.dataset.tipo);
   else if (a.dataset.act === 'aiview') { b.view = a.dataset.f; renderBurst(b); document.getElementById('b' + b.id)?.scrollIntoView({ block: 'nearest' }); return; }
@@ -357,7 +376,6 @@ async function runAI(list, retry) {
   if (AI.stopped) { updateAIBar(); return; }
   const todo = (list || bursts.filter(pendienteIA)).filter(b => b.n && !AI.busy.has(b));
   if (!todo.length) { updateAIBar(); return; }
-  const apt = $('#apt').value.trim().toUpperCase();
   const queue = [...todo];
   todo.forEach(b => { AI.busy.add(b); b.aiErr = ''; refresh(b); });
   updateAIBar();
@@ -370,7 +388,7 @@ async function runAI(list, retry) {
         const { data } = await sb.auth.getSession();
         const token = data.session?.access_token;
         if (!token) { const e = new Error('Vuelve a entrar en la web para usar la IA.'); e.code = 'sin_sesion'; throw e; }
-        applyAI(b, await identificar(b, { token, aeropuerto: apt, fecha: ymd(b.frames[0].t), comparar: COMPARAR }));
+        applyAI(b, await identificar(b, { token, aeropuerto: aptDe(b), fecha: ymd(b.frames[0].t), comparar: COMPARAR }));
       } catch (e) {
         delete b.enRepaso;
         if (['sin_clave', 'limite', 'sin_sesion'].includes(e.code)) AI.stopped = e.message;
@@ -400,7 +418,7 @@ function terminarRonda() {
       && (b.ai.para !== b.n || (b.x && b.ai.segunda !== b.x)));
     if (repaso.length) { repaso.forEach(b => { b.repaso = true; b.enRepaso = true; }); runAI(repaso); }
   }
-  if (!AI.busy.size) programarCruce();
+  if (!AI.busy.size) { programarCruce(); programarDeteccion(); }
 }
 function refresh(b) { if (bursts.includes(b)) renderBurst(b); }
 function renderStat() {
@@ -485,20 +503,22 @@ function cmpLine(r) {
 function markDups() {
   const prev = bursts.map(b => b.dupOf), changed = [];
   bursts.forEach(b => { b.dupOf = undefined; b.dupPor = ''; });
-  const raiz = new Map();   // matrícula → primera ráfaga con ella
+  // v0.4: solo dentro del mismo tramo (mismo día y aeropuerto): el mismo avión en otro aeropuerto es otra entrada
+  const K = (b, reg) => (b.tramo ?? '') + '|' + reg;
+  const raiz = new Map();   // tramo|matrícula → primera ráfaga con ella
   bursts.forEach(b => {
     const k = claveReg(b.reg); if (!k) return;
-    if (raiz.has(k)) { b.dupOf = raiz.get(k).id; b.dupPor = 'reg'; } else raiz.set(k, b);
+    if (raiz.has(K(b, k))) { b.dupOf = raiz.get(K(b, k)).id; b.dupPor = 'reg'; } else raiz.set(K(b, k), b);
   });
   bursts.forEach(b => {
     if (claveReg(b.reg)) return;
     const re = patronParcial(b.ai?.matricula_parcial); if (!re) return;
-    const regs = [...raiz.keys()].filter(k => re.test(k));
+    const regs = [...raiz.keys()].filter(k => k.startsWith(K(b, '')) && re.test(k.slice(K(b, '').length)));
     if (regs.length === 1) { b.dupOf = raiz.get(regs[0]).id; b.dupPor = 'parcial'; }
   });
   // avión ya reconocido (por 1 o 2) de cada ráfaga
   const avion = new Map();
-  bursts.forEach(b => { const k = claveReg(b.reg) || (b.dupPor === 'parcial' ? claveReg(bursts.find(x => x.id === b.dupOf)?.reg) : ''); if (k) avion.set(b, k); });
+  bursts.forEach(b => { const k = claveReg(b.reg) ? K(b, claveReg(b.reg)) : b.dupPor === 'parcial' ? K(b, claveReg(bursts.find(x => x.id === b.dupOf)?.reg)) : ''; if (k) avion.set(b, k); });
   const ini = x => x.frames[0].t, fin = x => x.frames[x.frames.length - 1].t;
   const separacion = (x, y) => Math.max(0, ini(y) - fin(x), ini(x) - fin(y));
   const fam = t => claveReg(t).slice(0, 2);   // B732/B733 → B7 · LJ25/LJ35 → LJ (el tipo exacto lo da la ficha)
@@ -509,11 +529,11 @@ function markDups() {
     if (avion.has(b) || b.ai?.hay_avion === false || patronParcial(b.ai?.matricula_parcial)) return;
     let k = '';
     if (b.type || b.op) {
-      const regs = new Set(bursts.filter(o => avion.has(o) && separacion(b, o) < CERCA && casa(b, o)).map(o => avion.get(o)));
+      const regs = new Set(bursts.filter(o => avion.has(o) && o.tramo === b.tramo && separacion(b, o) < CERCA && casa(b, o)).map(o => avion.get(o)));
       if (regs.size === 1) k = [...regs][0];
     } else {
       const p = bursts[i - 1], n = bursts[i + 1];
-      if (p && n && avion.get(p) && avion.get(p) === avion.get(n) && separacion(b, p) < CERCA && separacion(b, n) < CERCA) k = avion.get(p);
+      if (p && n && avion.get(p) && avion.get(p) === avion.get(n) && p.tramo === b.tramo && separacion(b, p) < CERCA && separacion(b, n) < CERCA) k = avion.get(p);
     }
     if (k) { b.dupOf = raiz.get(k).id; b.dupPor = 'cerca'; }
   });
@@ -590,101 +610,285 @@ $('#cmpBtn').onclick = () => {
   const sig = difs.find(b => (document.getElementById('b' + b.id)?.getBoundingClientRect().top ?? 0) + window.scrollY > y) || difs[0];
   document.getElementById('b' + sig.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 };
-/* ---------------- v0.3 · cruce con ADS-B ---------------- */
+/* ---------------- v0.4 · tramos: cada uno con su aeropuerto ---------------- */
+// La carpeta se parte en tramos al cambiar de día o tras más de 2 h sin fotos (para cambiar de aeropuerto hay que volar
+// o conducir). Cada tramo tiene su aeropuerto: escrito a mano en el tramo, el de la carpeta (por defecto) o detectado
+// con las matrículas y el índice de escalas del ADS-B. Un tramo se puede partir («Otro aeropuerto desde aquí») o unir.
+const HUECO_TRAMO = 2 * 3600000;
+const ICAO = /^[A-Z0-9]{4}$/;
+let tramos = [], tramoN = 0;
+const tramoDe = b => tramos.find(t => t.id === b.tramo);
+const aptDe = b => tramoDe(b)?.apt || '';
+const aptCarpeta = () => { const a = $('#apt').value.trim().toUpperCase(); return ICAO.test(a) ? a : ''; };
+const nuevoTramo = () => { const a = aptCarpeta(); return { id: tramoN++, apt: a, por: a ? 'carpeta' : '', det: null }; };
+function calcularTramos() {
+  tramos = []; let t = null, prev = 0;
+  for (const b of bursts) {
+    const ini = b.frames[0].t;
+    if (!t || ymd(ini) !== ymd(prev) || ini - prev > HUECO_TRAMO) { t = nuevoTramo(); tramos.push(t); }
+    b.tramo = t.id; prev = Math.max(prev, b.frames[b.frames.length - 1].t);
+  }
+}
+// Tramos en el orden de la carpeta (por su primera ráfaga); los que se quedan sin ráfagas desaparecen
+function ordenTramos() {
+  const pos = new Map(); bursts.forEach((b, i) => { if (!pos.has(b.tramo)) pos.set(b.tramo, i); });
+  return tramos.filter(t => pos.has(t.id)).sort((x, y) => pos.get(x.id) - pos.get(y.id));
+}
+function tramosCambiados() {
+  tramos = ordenTramos(); renderAll(); updateSave(); DET.fase = 1; programarDeteccion(); if (adsbOn()) iniciarADSB();
+}
+function otroAeropuertoDesde(b) {
+  const t = tramoDe(b), nt = { id: tramoN++, apt: '', por: '', det: null };
+  bursts.slice(bursts.indexOf(b)).filter(x => x.tramo === t?.id).forEach(x => { x.tramo = nt.id; });
+  tramos.push(nt); tramosCambiados();
+  document.querySelector(`[data-tramo-apt="${nt.id}"]`)?.focus();
+}
+function unirTramoAnterior(id) {
+  const ord = ordenTramos(), k = ord.findIndex(t => t.id === id); if (k <= 0) return;
+  bursts.forEach(b => { if (b.tramo === id) b.tramo = ord[k - 1].id; });
+  tramosCambiados();
+}
+function ponerAptTramo(id, valor) {
+  const t = tramos.find(x => x.id === id); if (!t) return;
+  const a = String(valor || '').trim().toUpperCase();
+  if (ICAO.test(a)) { t.apt = a; t.por = 'mano'; }
+  else { t.apt = aptCarpeta(); t.por = t.apt ? 'carpeta' : ''; if (t.det?.apt && !t.apt) { t.apt = t.det.apt; t.por = 'adsb'; } }
+  pintarTramos(); bursts.filter(b => b.tramo === id).forEach(refresh); updateSave(); if (adsbOn()) iniciarADSB();
+}
+// El aeropuerto de la carpeta es el de los tramos que no tienen uno escrito a mano ni detectado
+$('#apt').addEventListener('change', () => {
+  const a = aptCarpeta();
+  for (const t of tramos) if (t.por !== 'mano' && t.por !== 'adsb') { t.apt = a; t.por = a ? 'carpeta' : ''; }
+  for (const t of tramos) if (!t.apt && t.det?.apt) { t.apt = t.det.apt; t.por = 'adsb'; }
+  if (bursts.length) { renderAll(); updateSave(); if (adsbOn()) iniciarADSB(); }
+});
+const fechaHora = t => new Date(t).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' }) + ' ' + hhmm(t);
+function cabeceraTramo(t, n) {
+  const bs = bursts.filter(b => b.tramo === t.id); if (!bs.length) return '';
+  const ini = bs[0].frames[0].t, fin = Math.max(...bs.map(b => b.frames[b.frames.length - 1].t));
+  const d = t.det, txt = [];
+  if (d?.apt) {
+    const quien = `${d.apoyos} de ${d.total} ${d.total === 1 ? 'matrícula' : 'matrículas'}`;
+    if (d.apt === t.apt && t.por === 'adsb') txt.push(`Detectado con el ADS-B: ${quien} estaba${d.apoyos === 1 ? '' : 'n'} en ${esc(d.apt)} a la hora de las fotos` + (d.claro ? '' : ` (también encaja ${esc(d.alternativa)}: compruébalo)`) + '.');
+    else if (d.apt === t.apt) txt.push(`✓ El ADS-B lo confirma (${quien}).`);
+    else txt.push(`⚠ El ADS-B lo sitúa en <b>${esc(d.apt)}</b> (${quien}). <button class="btn sm ghost" data-tact="usar" data-apt="${esc(d.apt)}">Usar ${esc(d.apt)}</button>`);
+  } else if (t.por !== 'mano') {
+    const e = DET.estadoTramo.get(t.id);
+    if (e === 'buscando') txt.push('Buscando el aeropuerto con las matrículas…');
+    else if (e === 'sin_regs') txt.push(t.apt ? '' : 'Para detectarlo hace falta alguna matrícula leída (o escríbelo).');
+    else if (e === 'no') txt.push(t.apt ? '' : 'El ADS-B no sitúa estas matrículas a esa hora: escríbelo a mano.');
+    else if (e === 'antiguo') txt.push(t.apt ? '' : 'No hay historial ADS-B de esa fecha (empieza el 10/03/2023): escríbelo a mano.');
+    else if (e === 'reciente') txt.push(t.apt ? '' : 'El historial ADS-B de hoy aún no está publicado: escríbelo o vuelve mañana.');
+  }
+  if (!t.apt && !txt.length) txt.push(adsbOn() ? 'Se detectará con las matrículas (o escríbelo).' : 'Escribe el aeropuerto (código OACI).');
+  return `<div class="tramo" id="t${t.id}" data-tramo="${t.id}">
+    <span class="tt">Tramo ${n} · ${esc(fechaHora(ini))}–${esc(hhmm(fin))} · ${bs.length} ${bs.length === 1 ? 'ráfaga' : 'ráfagas'}</span>
+    <label class="field">Aeropuerto <input type="text" class="icao${t.por === 'adsb' ? ' byadsb' : ''}" data-tramo-apt="${t.id}" value="${esc(t.apt)}" maxlength="4" placeholder="????" aria-label="Aeropuerto del tramo ${n}"></label>
+    ${txt.length ? `<span class="tdet">${txt.join(' ')}</span>` : ''}
+    ${n > 1 ? '<button class="btn sm ghost" data-tact="unir" title="Las ráfagas de este tramo pasan al anterior">Unir con el tramo anterior</button>' : ''}
+  </div>`;
+}
+function pintarTramos() {
+  ordenTramos().forEach((t, i) => { const el = document.getElementById('t' + t.id); if (el) el.outerHTML = cabeceraTramo(t, i + 1); });
+}
+$('#bursts').addEventListener('click', e => {
+  const cab = e.target.closest('.tramo'); if (!cab) return;
+  const id = +cab.dataset.tramo, a = e.target.closest('[data-tact]'); if (!a) return;
+  if (a.dataset.tact === 'unir') unirTramoAnterior(id);
+  else if (a.dataset.tact === 'usar') ponerAptTramo(id, a.dataset.apt);
+});
+$('#bursts').addEventListener('change', e => { const i = e.target.closest('[data-tramo-apt]'); if (i) ponerAptTramo(+i.dataset.tramoApt, i.value); });
+
+/* ---------------- v0.4 · detección del aeropuerto (índice mundial de escalas) ---------------- */
+// Con las matrículas de cada tramo (leídas por la IA o escritas) y la hora de la cámara, busca en qué aeropuerto
+// estaban todas (js/escalas.js). Los días del índice (TODO) se piden como los del ADS-B: la primera vez se preparan
+// en GitHub Actions (unos 3 min por día) y luego quedan para todos. Primero solo los días que cubren la hora de casa
+// ± 3 h; si algún tramo no se encuentra, todo el rango (la cámara podía ir en la hora de otro país).
+const DET = { fase: 1, timer: 0, estadoTramo: new Map(), corriendo: false, otraVez: false };
+// Matrículas fiables para situar el tramo: escritas a mano o leídas enteras por la IA sin confianza baja
+const regFiable = b => regPropia(b) && b.ai?.hay_avion !== false && (b.touched.reg || (claveReg(b.ai?.matricula) === claveReg(b.reg) && b.ai?.confianza !== 'baja'));
+const horaFoto = b => paredDe((b.frames.find(f => f.name === b.n) || b.frames[0]).t);
+function programarDeteccion() { clearTimeout(DET.timer); DET.timer = setTimeout(detectarAeropuertos, 600); }
+async function detectarAeropuertos() {
+  if (!adsbOn() || !bursts.length || !tramos.length) return;
+  if (DET.corriendo) { DET.otraVez = true; return; }   // ya hay una en marcha: se repite al terminar
+  DET.corriendo = true;
+  try {
+    const ts = ordenTramos().filter(t => t.por !== 'mano').map(t => ({ id: t.id, consultas: bursts.filter(b => b.tramo === t.id && b.n && regFiable(b)).map(b => ({ reg: claveReg(b.reg), pared: horaFoto(b) })) }));
+    ts.forEach(t => DET.estadoTramo.set(t.id, t.consultas.length ? 'buscando' : 'sin_regs'));
+    const conRegs = ts.filter(t => t.consultas.length);
+    if (!conRegs.length) { pintarTramos(); pintarADSB(); return; }
+    const paredes = conRegs.flatMap(t => t.consultas.map(c => c.pared));
+    const c = desfaseCasa(paredes[0]);
+    const hoy = new Date().toISOString().slice(0, 10);
+    const todos = diasNecesarios(paredes, ...(DET.fase >= 2 ? [-720, 840] : [c - 180, c + 180]));
+    const dias = todos.filter(f => f >= ADSB_DESDE && f < hoy);
+    if (!dias.length) { conRegs.forEach(t => DET.estadoTramo.set(t.id, todos.every(f => f < ADSB_DESDE) ? 'antiguo' : 'reciente')); pintarTramos(); pintarADSB(); return; }
+    const x = apEstado('TODO');
+    const faltan = dias.filter(f => !x.fechas.includes(f));
+    if (faltan.length) { await pedirADSB('TODO', { fechas: faltan }, true); await vigilarADSB(); }
+    const indices = new Map(dias.filter(f => ADSB.docs.has(claveDia('TODO', f))).map(f => [f, ADSB.docs.get(claveDia('TODO', f))]));
+    const esperando = dias.some(f => !ADSB.docs.has(claveDia('TODO', f)) && ESPERA.includes(x.estados[f]));
+    if (!indices.size) { if (!esperando) conRegs.forEach(t => DET.estadoTramo.set(t.id, 'no')); pintarTramos(); pintarADSB(); return; }
+    const res = detectar(conRegs, indices);
+    let cambio = false; const hs = [];
+    for (const t of conRegs) {
+      const r = res.get(t.id), tr = tramos.find(z => z.id === t.id);
+      if (!tr) continue;
+      if (!r?.apt) { tr.det = null; DET.estadoTramo.set(t.id, esperando ? 'buscando' : 'no'); continue; }
+      tr.det = r; DET.estadoTramo.set(t.id, 'ok'); hs.push(r.h);
+      if ((tr.por === 'adsb' || !tr.por) && tr.apt !== r.apt) { tr.apt = r.apt; tr.por = 'adsb'; cambio = true; }
+    }
+    // desfase de la cámara (min por delante de UTC) más repetido entre los tramos encontrados: punto de partida del ADS-B
+    const hAntes = ADSB.hDet;
+    if (hs.length) ADSB.hDet = hs.sort((p, q) => hs.filter(v => v === q).length - hs.filter(v => v === p).length)[0];
+    if (ADSB.hDet !== hAntes) programarCruce();   // la hora de la cámara de partida ha cambiado: se vuelve a cruzar
+    // algún tramo sin encontrar con los días de la hora de casa: probar todo el rango (una vez)
+    if (DET.fase < 2 && !esperando && conRegs.some(t => !res.get(t.id)?.apt)) { DET.fase = 2; programarDeteccion(); }
+    pintarTramos();
+    if (cambio) { bursts.forEach(refresh); updateSave(); }
+    if (cambio || hs.length) iniciarADSB();
+  } finally {
+    DET.corriendo = false;
+    if (DET.otraVez) { DET.otraVez = false; programarDeteccion(); }
+  }
+}
+
+/* ---------------- v0.3 · cruce con ADS-B (v0.4: un aeropuerto por tramo) ---------------- */
 // Los datos (adsb.lol) se piden al servidor por aeropuerto y día UTC. La primera vez, GitHub Actions tarda unos minutos
 // por día en prepararlos; después quedan guardados para todos. El cruce se hace aquí, en el navegador (js/adsb.js).
-const ADSB = { apt: '', tz: '', fechas: [], estados: {}, mensajes: {}, docs: new Map(), datos: null, clave: '', cal: null, manual: null, timer: 0, pedido: 0, error: '', cargando: false };
+// La hora de la cámara se calibra una vez para toda la carpeta, en UTC (la cámara no cambia de hora al volar).
+const ADSB = { apts: new Map(), docs: new Map(), cal: null, manual: null, hDet: null, timer: 0, error: '' };
+const apEstado = apt => { let x = ADSB.apts.get(apt); if (!x) ADSB.apts.set(apt, x = { fechas: [], estados: {}, mensajes: {}, pedido: 0, cargando: false, tz: '', datos: null, clave: '', error: '' }); return x; };
 const ESPERA = ['pendiente', 'procesando'];
 const ETIQUETA = { sin_datos: 'sin datos ADS-B', error: 'falló la preparación', aun_no: 'aún no publicado', fuera_de_rango: 'fuera del historial (desde el 10/03/2023 hasta ayer)', sin_clave: 'el ADS-B aún no está activado en el servidor' };
 const adsbOn = () => $('#useADSB').checked;
 try { const v = localStorage.getItem('bs-useADSB'); if (v !== null) $('#useADSB').checked = v === '1'; } catch { /* sin almacenamiento */ }
 $('#useADSB').onchange = () => {
   try { localStorage.setItem('bs-useADSB', adsbOn() ? '1' : '0'); } catch { /* sin almacenamiento */ }
-  if (adsbOn()) iniciarADSB();
+  if (adsbOn()) { iniciarADSB(); programarDeteccion(); }
   else { clearTimeout(ADSB.timer); bursts.forEach(quitarPropuesta); markDups(); renderAll(); updateSave(); pintarADSB(); }
 };
-$('#apt').addEventListener('change', () => { if (bursts.length) iniciarADSB(); });
 $('#adsbDelta').addEventListener('change', e => {
   const v = e.target.value.trim(); ADSB.manual = v === '' || !Number.isFinite(+v) ? null : +v; cruzarADSB();
 });
-const claveDia = f => ADSB.apt + '|' + f;
+const claveDia = (apt, f) => apt + '|' + f;
 const fmtDia = f => `${f.slice(8, 10)}/${f.slice(5, 7)}`;
+// Minutos que la cámara va por delante de UTC, si ya se sabe (calibrada con el ADS-B o detectada con las escalas)
+const horaCamara = () => ADSB.cal?.calibrado ? -ADSB.cal.delta : ADSB.hDet;
+// Días UTC de unas ráfagas con la cámara h minutos por delante de UTC (± 30 min)
+function fechasDe(bs, h) {
+  const out = new Set();
+  for (const b of bs) for (const f of [b.frames[0], b.frames[b.frames.length - 1]]) {
+    const u = paredDe(f.t) - h * 60000;
+    out.add(new Date(u - 30 * 60000).toISOString().slice(0, 10)); out.add(new Date(u + 30 * 60000).toISOString().slice(0, 10));
+  }
+  return [...out].sort();
+}
 
 async function iniciarADSB() {
   clearTimeout(ADSB.timer);
   if (!adsbOn() || !bursts.length) { pintarADSB(); return; }
-  const apt = $('#apt').value.trim().toUpperCase();
-  if (apt !== ADSB.apt) {
-    Object.assign(ADSB, { apt, tz: '', fechas: [], estados: {}, mensajes: {}, datos: null, clave: '', cal: null });
-    bursts.forEach(b => { quitarPropuesta(b); b.adsb = null; }); renderAll();
-  }
   ADSB.error = '';
-  if (!/^[A-Z0-9]{4}$/.test(apt)) { ADSB.error = 'escribe el aeropuerto (código ICAO, p. ej. LEVC) para cruzar las fotos con el ADS-B.'; pintarADSB(); return; }
-  await pedirADSB({ rangos: rangosCamara(bursts) });
+  const porApt = new Map();
+  for (const b of bursts) { const a = aptDe(b); if (a) (porApt.get(a) || porApt.set(a, []).get(a)).push(b); }
+  if (!porApt.size) { pintarADSB(); vigilarADSB(); return; }
+  programarCruce();   // con los datos que ya haya (p. ej. al cambiar el aeropuerto de un tramo a uno ya descargado)
+  const h = horaCamara();
+  for (const [apt, bs] of porApt) {
+    const x = apEstado(apt);
+    // sin saber la hora de la cámara se supone la local del aeropuerto (el servidor la pasa a UTC)
+    if (h == null) await pedirADSB(apt, { rangos: rangosCamara(bs) }, true);
+    else { const fs = fechasDe(bs, h).filter(f => !x.fechas.includes(f)); if (fs.length) await pedirADSB(apt, { fechas: fs }, true); }
+  }
+  vigilarADSB();
 }
-async function pedirADSB(cuerpo) {
+async function pedirADSB(apt, cuerpo, sinVigilar) {
   const { data } = await sb.auth.getSession(); const tk = data.session?.access_token;
   if (!tk) { ADSB.error = 'vuelve a entrar en la web para usar el ADS-B.'; pintarADSB(); return; }
-  const apt = ADSB.apt;
-  ADSB.pedido = Date.now(); ADSB.cargando = true; pintarADSB();
+  const x = apEstado(apt);
+  x.pedido = Date.now(); x.cargando = true; x.error = ''; pintarADSB();
   try {
     const r = await fetch('/api/adsb', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tk}` }, body: JSON.stringify({ aeropuerto: apt, ...cuerpo }) });
     const j = await r.json().catch(() => null);
-    if (apt !== ADSB.apt) return;
     if (!j) throw new Error(`el servidor respondió ${r.status}`);
-    if (j.tz) ADSB.tz = j.tz;
-    ADSB.fechas = [...new Set([...ADSB.fechas, ...(j.fechas || [])])].sort();
-    Object.assign(ADSB.estados, j.estados || {}); Object.assign(ADSB.mensajes, j.mensajes || {});
-    if (!r.ok) ADSB.error = j.mensaje || `error ${r.status}`;
-  } catch (e) { ADSB.error = 'no se pudo pedir el ADS-B: ' + e.message; }
-  finally { ADSB.cargando = false; }
-  vigilarADSB();
+    if (j.tz) x.tz = j.tz;
+    x.fechas = [...new Set([...x.fechas, ...(j.fechas || [])])].sort();
+    Object.assign(x.estados, j.estados || {}); Object.assign(x.mensajes, j.mensajes || {});
+    if (!r.ok) x.error = j.mensaje || `error ${r.status}`;
+  } catch (e) { x.error = 'no se pudo pedir el ADS-B: ' + e.message; }
+  finally { x.cargando = false; }
+  if (!sinVigilar) vigilarADSB();
 }
-// Mira en Supabase cómo van los días pedidos, descarga los que ya están y vuelve a mirar cada 20 s mientras falte alguno
+// Mira en Supabase cómo van los días pedidos (de cada aeropuerto y del índice de escalas), descarga los que ya están
+// y vuelve a mirar cada 20 s mientras falte alguno
 async function vigilarADSB() {
   clearTimeout(ADSB.timer);
-  const apt = ADSB.apt;
-  const faltan = ADSB.fechas.filter(f => !ADSB.docs.has(claveDia(f)) && (ESPERA.includes(ADSB.estados[f]) || ADSB.estados[f] === 'listo'));
-  if (faltan.length) {
+  let escalasNuevas = false, datosNuevos = false;
+  for (const [apt, x] of ADSB.apts) {
+    const faltan = x.fechas.filter(f => !ADSB.docs.has(claveDia(apt, f)) && (ESPERA.includes(x.estados[f]) || x.estados[f] === 'listo'));
+    if (!faltan.length) continue;
     const { data } = await sb.from('adsb_dias').select('fecha,estado,ruta,mensaje').eq('aeropuerto', apt).in('fecha', faltan);
-    if (apt !== ADSB.apt) return;   // cambió el aeropuerto mientras tanto
     for (const row of data || []) {
-      ADSB.estados[row.fecha] = row.estado; ADSB.mensajes[row.fecha] = row.mensaje || '';
+      x.estados[row.fecha] = row.estado; x.mensajes[row.fecha] = row.mensaje || '';
       if (row.estado === 'listo' && row.ruta) {
-        try { ADSB.docs.set(claveDia(row.fecha), await descargarDia(`${SUPABASE_URL}/storage/v1/object/public/adsb/${row.ruta}`)); }
-        catch (e) { ADSB.estados[row.fecha] = 'error'; ADSB.mensajes[row.fecha] = 'no se pudo descargar: ' + e.message; }
+        try {
+          ADSB.docs.set(claveDia(apt, row.fecha), await descargarDia(`${SUPABASE_URL}/storage/v1/object/public/adsb/${row.ruta}`));
+          if (apt === 'TODO') escalasNuevas = true;
+        } catch (e) { x.estados[row.fecha] = 'error'; x.mensajes[row.fecha] = 'no se pudo descargar: ' + e.message; }
       }
     }
   }
-  if (apt !== ADSB.apt) return;
-  const docs = ADSB.fechas.map(f => ADSB.docs.get(claveDia(f))).filter(Boolean);
-  const clave = apt + ':' + docs.map(d => d.fecha).join(',');
-  if (docs.length && clave !== ADSB.clave) { ADSB.clave = clave; ADSB.datos = juntarDias(docs); ADSB.tz ||= ADSB.datos.apt?.tz || ''; cruzarADSB(); }
-  if (ADSB.fechas.some(f => !ADSB.docs.has(claveDia(f)) && ESPERA.includes(ADSB.estados[f]))) {
-    // si un día lleva mucho en cola (p. ej. el procesado se cortó), se vuelve a pedir: el servidor lo relanza
-    if (Date.now() - ADSB.pedido > 22 * 60000) { pedirADSB({ fechas: ADSB.fechas }); return; }
-    ADSB.timer = setTimeout(vigilarADSB, 20000);
+  for (const [apt, x] of ADSB.apts) {
+    if (apt === 'TODO') continue;
+    const docs = x.fechas.map(f => ADSB.docs.get(claveDia(apt, f))).filter(Boolean);
+    const clave = docs.map(d => d.fecha).join(',');
+    if (docs.length && clave !== x.clave) { x.clave = clave; x.datos = juntarDias(docs); x.tz ||= x.datos.apt?.tz || ''; datosNuevos = true; }
   }
-  pintarADSB();
+  if (escalasNuevas) programarDeteccion();
+  if (datosNuevos) cruzarADSB();
+  let esperando = false;
+  for (const [apt, x] of ADSB.apts) {
+    if (!x.fechas.some(f => !ADSB.docs.has(claveDia(apt, f)) && ESPERA.includes(x.estados[f]))) continue;
+    esperando = true;
+    // si un día lleva mucho en cola (p. ej. el procesado se cortó), se vuelve a pedir: el servidor lo relanza
+    if (Date.now() - x.pedido > 22 * 60000) await pedirADSB(apt, { fechas: x.fechas.filter(f => !ADSB.docs.has(claveDia(apt, f))) }, true);
+  }
+  clearTimeout(ADSB.timer);
+  if (esperando) ADSB.timer = setTimeout(vigilarADSB, 20000);
+  pintarADSB(); pintarTramos();
 }
 
 let cruceT = 0;
 function programarCruce() { clearTimeout(cruceT); cruceT = setTimeout(cruzarADSB, 400); }
-// Calibra la hora de la cámara con las matrículas ya conocidas y mira qué dice el ADS-B de cada ráfaga
+const datosDe = b => { const x = ADSB.apts.get(aptDe(b)); return x?.datos?.aviones.length ? x.datos : null; };
+// Calibra la hora de la cámara con las matrículas ya conocidas (de todos los aeropuertos) y mira qué dice el ADS-B de
+// cada ráfaga con los datos de SU aeropuerto
 function cruzarADSB() {
-  if (!adsbOn() || !ADSB.datos?.aviones.length || !bursts.length) { pintarADSB(); return; }
-  const tz = ADSB.tz, datos = ADSB.datos;
-  const cal = ADSB.cal = calibrar(anclas(bursts, datos), tz, ADSB.manual);
+  const conDatos = [...ADSB.apts].filter(([a, x]) => a !== 'TODO' && x.datos?.aviones.length);
+  if (!adsbOn() || !conDatos.length || !bursts.length) { pintarADSB(); return; }
+  const an = conDatos.flatMap(([apt, x]) => anclas(bursts.filter(b => aptDe(b) === apt), x.datos));
+  // referencia: la hora local del primer aeropuerto con datos (lo que se muestra y lo que se escribe a mano)
+  const [refApt, refX] = conDatos[0], p0 = an[0]?.pared ?? paredDe(bursts[0].frames[0].t);
+  const offRef = desfaseZona(refX.tz, p0) ?? 0;
+  const ref = ADSB.hDet != null ? -ADSB.hDet : -offRef;
+  const cal = ADSB.cal = calibrar(an, 'UTC', ADSB.manual == null ? null : ADSB.manual - offRef, ref);
+  Object.assign(cal, { offRef, refApt });
   // con el desfase calculado, ¿hacen falta otros días UTC? (p. ej. la cámara iba en la hora de otro país)
-  const extra = cal.calibrado ? fechasUtc(bursts, tz, cal.delta).filter(f => !ADSB.fechas.includes(f)) : [];
-  if (extra.length) pedirADSB({ fechas: extra });
+  if (cal.calibrado || ADSB.hDet != null) {
+    for (const [apt, x] of conDatos) {
+      const extra = fechasUtc(bursts.filter(b => aptDe(b) === apt), 'UTC', cal.delta).filter(f => !x.fechas.includes(f));
+      if (extra.length) pedirADSB(apt, { fechas: extra });
+    }
+  }
+  if (reagruparADSB()) return;   // ha juntado o separado ráfagas: el cruce se repite con las nuevas
   let cambios = 0;
   for (const b of bursts) {
-    const antes = JSON.stringify(b.adsb || null) + b.reg + b.type;
-    if (!b.n || b.ai?.hay_avion === false) { quitarPropuesta(b); b.adsb = null; }
+    const antes = JSON.stringify(b.adsb || null) + b.reg + b.type, datos = datosDe(b);
+    if (!datos || !b.n || b.ai?.hay_avion === false) { quitarPropuesta(b); b.adsb = null; }
     else {
-      const r = decidir(b, candidatos(b, datos, cal, tz), datos);
-      b.adsb = resumir(r, b, tz, cal);
+      const r = decidir(b, candidatos(b, datos, cal, 'UTC'), datos);
+      b.adsb = { ...resumir(r, b, 'UTC', cal, datos.apt?.tz || 'UTC'), apt: datos.apt?.icao || '' };
       if (r.estado === 'propuesta') proponer(b, r.c); else if (!regPropia(b)) quitarPropuesta(b);
       else tipoDeADSB(b, r);
     }
@@ -700,6 +904,54 @@ function cruzarADSB() {
   }
   pintarADSB();
 }
+// v0.4.1 · Corrige el primer corte de ráfagas (8 s sin fotos) con el ADS-B, cuando la cámara ya está en hora (hacen
+// falta 2 aviones identificados): sabe qué avión pasaba por delante en cada momento (js/adsb.js · delanteEn).
+//  · Separa una ráfaga si dos trozos seguidos (con ≥ 3 s sin fotos entre medias) tienen delante aviones distintos.
+//  · Junta dos ráfagas seguidas del mismo tramo (< 3 min) si delante pasaba el mismo avión y sus matrículas, si las
+//    hay, son las de ese avión.
+// Lo que decides tú manda: no separa las que uniste a mano ni junta las que separaste a mano. Espera a que la IA
+// termine la ronda (no cambia ráfagas que se están identificando).
+const principalDe = b => b.frames.find(f => f.name === b.n) || b.frames[0];
+function reagruparADSB() {
+  const cal = ADSB.cal;
+  if (!cal?.calibrado || AI.busy.size || !adsbOn()) return 0;
+  const utc = t => paredDe(t) + cal.delta * 60000, nuevas = [];
+  let cambios = 0;
+  for (let i = 0; i < bursts.length; i++) {
+    const b = bursts[i], datos = datosDe(b);
+    if (!datos || b.frames.length < 2 || b.touched.reg || b.sinCortesADSB || b.ai?.hay_avion === false) continue;
+    const trozos = [[b.frames[0]]];
+    for (let k = 1; k < b.frames.length; k++) { if (b.frames[k].t - b.frames[k - 1].t >= 3000) trozos.push([]); trozos[trozos.length - 1].push(b.frames[k]); }
+    if (trozos.length < 2) continue;
+    const quien = trozos.map(tr => delanteEn(datos, cal, utc(tr[tr.length >> 1].t)));
+    // si la ráfaga ya está identificada, uno de los trozos tiene que ser ese avión (si no, «delante» no es fiable aquí)
+    const suya = claveReg(b.reg);
+    if (suya && !quien.some(q => q?.reg === suya)) continue;
+    const k = quien.findIndex((q, j) => j > 0 && q && quien[j - 1] && q.reg !== quien[j - 1].reg);
+    if (k > 0) { nuevas.push(...splitAt(i, trozos[k][0].name, { delante: quien[k].matricula })); cambios++; }
+  }
+  for (let i = bursts.length - 1; i > 0; i--) {
+    const p = bursts[i - 1], b = bursts[i], datos = datosDe(b);
+    if (!datos || datosDe(p) !== datos || b.mano || b.auto === 'adsb' || b.tramo !== p.tramo) continue;
+    if (b.frames[0].t - p.frames[p.frames.length - 1].t > 3 * 60000 || p.ai?.hay_avion === false || b.ai?.hay_avion === false) continue;
+    const qp = delanteEn(datos, cal, utc(principalDe(p).t)), qb = delanteEn(datos, cal, utc(principalDe(b).t));
+    if (!qp || !qb || qp.reg !== qb.reg) continue;
+    const kp = claveReg(p.reg), kb = claveReg(b.reg);
+    if ((kp && kp !== qp.reg) || (kb && kb !== qp.reg)) continue;
+    // y el tipo que ve la IA, si lo dice, el de ese avión (si no, quizá fotografiaba otro, p. ej. uno aparcado)
+    const tipoOk = x => { const t = x.ai?.tipo_icao || (x.touched.type ? x.type : ''); return !t || !qp.tipo || familia(t) === familia(qp.tipo); };
+    if (!tipoOk(p) || !tipoOk(b)) continue;
+    mergeBursts(i - 1, i, true); cambios++;
+  }
+  if (!cambios) return 0;
+  renumber(); markSimilar(); markDups(); renderAll(); updateSave(); updateAIBar();
+  toast(`ADS-B: ${cambios} ${cambios === 1 ? 'ráfaga corregida' : 'ráfagas corregidas'} (mismo avión juntado o dos aviones separados)`);
+  const pend = nuevas.filter(b => bursts.includes(b));
+  if (pend.length && aiOn()) runAI(pend);
+  programarCruce();
+  return cambios;
+}
+
 // Matrícula propuesta por el ADS-B: se escribe en el campo (con borde discontinuo) mientras no la cambies tú
 function proponer(b, c) {
   if (b.touched.reg || (b.reg && b.reg !== b.regAdsb)) return;
@@ -735,40 +987,65 @@ function adsbLine(b) {
     case 'propuesta': return b.regAdsb && b.reg === b.regAdsb
       ? `<p class="adsbline prop">${tag}<span>Matrícula propuesta: <b>${esc(a.reg)}</b> ${descADSB(a)} a las ${esc(a.hora)} — el único avión a esa hora que encaja ${a.por === 'parcial' ? 'con la matrícula parcial' : 'con el tipo'}. Compruébala.</span></p>` : '';
     case 'corregir': return `<p class="adsbline warn">${tag}<span>⚠ A esa hora no consta ${esc(b.reg)}, pero sí <b>${esc(a.reg)}</b> (${descADSB(a)}): ¿la IA leyó mal una letra?</span>${botonADSB(a, true)}</p>`;
-    case 'otra_hora': return `<p class="adsbline warn">${tag}<span>${esc(a.reg)} estuvo en ${esc(ADSB.apt)} ese día (a las ${esc(a.hora)}), pero no a la hora de esta foto: revisa la matrícula.</span></p>`;
+    case 'otra_hora': return `<p class="adsbline warn">${tag}<span>${esc(a.reg)} estuvo en ${esc(a.apt)} ese día (a las ${esc(a.hora)}), pero no a la hora de esta foto: revisa la matrícula.</span></p>`;
     case 'no_consta': return `<p class="adsbline">${tag}<span>${esc(b.reg)} no aparece en el ADS-B de ese día (puede que no emita o que no haya cobertura).</span>${(a.top || []).map(c => botonADSB(c)).join('')}</p>`;
     case 'candidatos': return a.top?.length ? `<p class="adsbline">${tag}<span>A esa hora:</span>${a.top.map(c => botonADSB(c)).join('')}</p>` : '';
     default: return '';
   }
 }
+// Hora de la cámara respecto a la hora local del aeropuerto de referencia (el primero con datos)
 function relojCamara(cal) {
-  const d = Math.round(Math.abs(cal.delta)), txt = d >= 60 ? `${Math.floor(d / 60)} h${d % 60 ? ' ' + (d % 60) + ' min' : ''}` : `${d} min`;
-  if (cal.manual) return `hora de la cámara corregida a mano (${cal.delta > 0 ? '+' : ''}${cal.delta} min)`;
-  if (!cal.calibrado) return 'hora de la cámara sin comprobar (hacen falta 2 aviones con matrícula, leída o escrita): se usa la hora local del aeropuerto';
-  if (!d) return `la hora de la cámara cuadra (comprobado con ${cal.n} aviones)`;
-  return `la cámara iba ${txt} ${cal.delta < 0 ? 'adelantada' : 'atrasada'} (calculado con ${cal.n} aviones; ya está corregido)`;
+  const dl = Math.round(cal.delta + (cal.offRef || 0)), d = Math.abs(dl), donde = cal.refApt ? ` de ${cal.refApt}` : '';
+  const txt = d >= 60 ? `${Math.floor(d / 60)} h${d % 60 ? ' ' + (d % 60) + ' min' : ''}` : `${d} min`;
+  const desfase = !d ? `en la hora local${donde}` : `${txt} ${dl < 0 ? 'adelantada' : 'atrasada'} respecto a la hora local${donde}`;
+  if (cal.manual) return `hora de la cámara corregida a mano (${dl > 0 ? '+' : ''}${dl} min sobre la hora local${donde})`;
+  if (!cal.calibrado) return ADSB.hDet != null ? `la cámara iba ${desfase} (según las escalas; con 2 aviones identificados se afina)`
+    : 'hora de la cámara sin comprobar (hacen falta 2 aviones con matrícula, leída o escrita): se usa la hora local del aeropuerto';
+  return `la cámara iba ${desfase} (calculado con ${cal.n} aviones; ya está corregido)`;
+}
+// Estado de la detección de aeropuertos para la barra del ADS-B
+function textoDeteccion() {
+  const x = ADSB.apts.get('TODO'), ts = ordenTramos().filter(t => t.por !== 'mano');
+  if (!ts.length) return '';
+  const esperan = x ? x.fechas.filter(f => !ADSB.docs.has(claveDia('TODO', f)) && ESPERA.includes(x.estados[f])) : [];
+  const malos = x ? x.fechas.filter(f => !ESPERA.includes(x.estados[f]) && x.estados[f] && x.estados[f] !== 'listo') : [];
+  const ok = ts.filter(t => t.det?.apt).length;
+  const p = [];
+  if (esperan.length) p.push(`preparando el índice de escalas del ${esperan.map(fmtDia).join(', ')} (unos 3 min por día la primera vez)`);
+  if (ok) p.push(`${ok} de ${ts.length} ${ts.length === 1 ? 'tramo situado' : 'tramos situados'} por sus matrículas`);
+  for (const f of malos) p.push(`escalas ${fmtDia(f)}: ${x.mensajes[f] || ETIQUETA[x.estados[f]] || x.estados[f]}`);
+  if (x?.error) p.push(x.error);
+  return p.length ? 'Aeropuertos: ' + p.join(', ') : '';
 }
 function pintarADSB() {
   const bar = $('#adsbBar');
   if (!adsbOn() || !bursts.length) { bar.hidden = true; return; }
   bar.hidden = false;
-  const partes = [];
-  const esperan = ADSB.fechas.filter(f => !ADSB.docs.has(claveDia(f)) && ESPERA.includes(ADSB.estados[f]));
-  if (ADSB.cargando && !ADSB.fechas.length) partes.push('pidiendo los datos…');
-  if (esperan.length) partes.push(`preparando ${esperan.map(fmtDia).join(', ')} (la primera vez tarda unos 5 min por día; después queda guardado)`);
-  if (ADSB.datos && ADSB.cal) {
+  const partes = [], det = textoDeteccion();
+  if (det) partes.push(det);
+  for (const [apt, x] of ADSB.apts) {
+    if (apt === 'TODO') continue;
+    const p = [], esperan = x.fechas.filter(f => !ADSB.docs.has(claveDia(apt, f)) && ESPERA.includes(x.estados[f]));
+    if (x.cargando && !x.fechas.length) p.push('pidiendo los datos…');
+    if (esperan.length) p.push(`preparando ${esperan.map(fmtDia).join(', ')} (la primera vez tarda unos 5 min por día; después queda guardado)`);
+    if (x.datos) p.push(`${x.datos.aviones.length} aviones en ${x.datos.fechas.map(fmtDia).join(', ')}`);
+    for (const f of x.fechas) if (!ESPERA.includes(x.estados[f]) && x.estados[f] !== 'listo' && x.estados[f]) p.push(`${fmtDia(f)}: ${x.mensajes[f] || ETIQUETA[x.estados[f]] || x.estados[f]}`);
+    if (x.error) p.push(x.error);
+    if (bursts.some(b => aptDe(b) === apt)) partes.push(`${apt}: ${p.join(' · ') || '…'}`);
+  }
+  if (ADSB.cal) {
     const n = {}; bursts.forEach(b => { if (b.adsb) n[b.adsb.estado] = (n[b.adsb.estado] || 0) + 1; });
     const props = bursts.filter(b => b.adsb?.estado === 'propuesta' && b.regAdsb && b.reg === b.regAdsb).length;
-    partes.push(`${ADSB.datos.aviones.length} aviones en ${ADSB.datos.fechas.map(fmtDia).join(', ')}`, relojCamara(ADSB.cal),
+    partes.push(relojCamara(ADSB.cal),
       [n.confirmada && `${n.confirmada} confirmadas`, props && `${props} propuestas`, n.corregir && `${n.corregir} posibles errores de lectura`,
         (n.otra_hora || n.no_consta) && `${(n.otra_hora || 0) + (n.no_consta || 0)} sin rastro a esa hora`, n.candidatos && `${n.candidatos} con candidatos para elegir`].filter(Boolean).join(', ') || 'sin coincidencias');
   }
-  for (const f of ADSB.fechas) if (!ESPERA.includes(ADSB.estados[f]) && ADSB.estados[f] !== 'listo' && ADSB.estados[f]) partes.push(`${fmtDia(f)}: ${ADSB.mensajes[f] || ETIQUETA[ADSB.estados[f]] || ADSB.estados[f]}`);
+  if (!tramos.some(t => t.apt) && !ADSB.apts.get('TODO')?.fechas.length) partes.push('escribe el aeropuerto o espera a que la IA lea alguna matrícula para detectarlo');
   if (ADSB.error) partes.push(ADSB.error);
-  $('#adsbStat').textContent = `ADS-B${ADSB.apt ? ' · ' + ADSB.apt : ''}: ` + (partes.join(' · ') || '…');
+  $('#adsbStat').textContent = 'ADS-B · ' + (partes.join(' · ') || '…');
   const inp = $('#adsbDelta');
   if (document.activeElement !== inp) inp.value = ADSB.manual != null ? ADSB.manual : '';
-  inp.placeholder = ADSB.cal && !ADSB.cal.manual ? String(Math.round(ADSB.cal.delta)) : 'auto';
+  inp.placeholder = ADSB.cal && !ADSB.cal.manual ? String(Math.round(ADSB.cal.delta + (ADSB.cal.offRef || 0))) : 'auto';
 }
 
 function notaDe(b) {
@@ -788,14 +1065,17 @@ function notaDe(b) {
   else if (a?.estado === 'corregir') rev.push(`ADS-B: a esa hora estaba ${a.reg}, no ${b.reg}`);
   else if (a?.estado === 'otra_hora') rev.push(`ADS-B: ${a.reg} estuvo ese día a las ${a.hora}, no a la hora de la foto`);
   else if (a?.estado === 'no_consta') rev.push('la matrícula no aparece en el ADS-B ese día');
+  const t = tramoDe(b);
+  if (!aptDe(b)) rev.push('sin aeropuerto');
+  else if (t?.det?.apt && t.det.apt !== t.apt) rev.push(`el ADS-B sitúa las matrículas de este tramo en ${t.det.apt}, no en ${t.apt}`);
+  const aptTxt = t?.por === 'adsb' && t.det?.apt === t.apt ? `Aeropuerto detectado por las escalas (adsb.lol): ${t.det.apoyos} de ${t.det.total} matrículas` : '';
   const adsbTxt = a?.estado === 'confirmada' ? `✓ ADS-B (adsb.lol): ${a.fase} a las ${a.hora}` : '';
-  return [rev.length ? '⚠ Revisar: ' + rev.join('; ') : '', adsbTxt, r ? `IA (${r.confianza}): ${r.motivo}` : ''].filter(Boolean).join(' · ');
+  return [rev.length ? '⚠ Revisar: ' + rev.join('; ') : '', aptTxt, adsbTxt, r ? `IA (${r.confianza}): ${r.motivo}` : ''].filter(Boolean).join(' · ');
 }
 
 function updateSave() { const n = bursts.filter(b => b.on && b.n).length, off = bursts.filter(b => !b.on).length; $('#saveStat').textContent = `${n} ráfagas se guardarán como pendientes en «${folder}»` + (off ? ` · ${off} desmarcadas` : ''); $('#saveBtn').disabled = !n; }
 $('#saveBtn').onclick = async () => {
   const todo = bursts.filter(b => b.on && b.n && !b.saved);
-  const apt = $('#apt').value.trim().toUpperCase();
   $('#saveBtn').disabled = true; let ok = 0, fail = 0;
   for (const b of todo) {
     const nF = b.frames.find(f => f.name === b.n);
@@ -805,7 +1085,7 @@ $('#saveBtn').onclick = async () => {
       const up = await sb.storage.from('thumbs').upload(thumb_path, nF.keepBlob, { contentType: 'image/jpeg' });
       if (up.error) thumb_path = null;
     }
-    const row = { fecha: ymd(b.frames[0].t), matricula: b.reg, tipo: b.type, operador: b.op, aeropuerto: apt, carpeta: folder, archivo: base(b.n), archivo2: b.x ? base(b.x) : '', nota: notaDe(b), pendiente: true, thumb_path };
+    const row = { fecha: ymd(b.frames[0].t), matricula: b.reg, tipo: b.type, operador: b.op, aeropuerto: aptDe(b), carpeta: folder, archivo: base(b.n), archivo2: b.x ? base(b.x) : '', nota: notaDe(b), pendiente: true, thumb_path };
     if (b.ai || b.adsb) row.ia = { ...(b.ai || {}), otras_tomas: undefined, otro_avion_en: undefined, adsb: (adsbOn() && b.adsb) || undefined };
     let { data, error } = await sb.from('entries').insert(row).select().single();
     if (error && row.ia && /\bia\b/.test(error.message)) { delete row.ia; ({ data, error } = await sb.from('entries').insert(row).select().single()); }

@@ -81,19 +81,28 @@ export function juntarDias(docs) {
     }
   }
   const aviones = [...porHex.values()].filter(x => x.T.length);
-  const porReg = new Map();
+  const porReg = new Map(), d0 = docs[0];
+  const ref = d0 && { lat: d0.lat, lon: d0.lon, elev: d0.elev || 0 };
   for (const x of aviones) {
+    x.ref = ref;
     x.reg = claveReg(x.r); x.tf = familia(x.t); x.ini = x.T[0]; x.fin = x.T[x.T.length - 1]; x.presente = presencia(x);
     x.vehiculo = !x.r && !x.t && x.al.every(a => a === SUELO);   // coches de pista con transpondedor
     if (x.reg && !porReg.has(x.reg)) porReg.set(x.reg, x);
   }
-  const d0 = docs[0];
   return { apt: d0 && { icao: d0.aeropuerto, lat: d0.lat, lon: d0.lon, elev: d0.elev, tz: d0.tz }, aviones, porReg, fechas: docs.map(d => d.fecha) };
 }
 
 /* ---------------- dónde estaba cada avión ---------------- */
 function indice(arr, T) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < T) lo = m + 1; else hi = m; } return lo; }
-const aparcadoEntre = (av, a, b) => av.al[a] === SUELO && av.al[b] === SUELO && av.T[b] - av.T[a] <= 8 * 3600000 && KM(av.la[a], av.lo[a], av.la[b], av.lo[b]) < 0.3;
+// Aparcado entre los puntos a y b: los dos en tierra en el mismo sitio (transpondedor apagado en el stand) o, en
+// aeropuertos sin cobertura en tierra, a llega bajo y b sale bajo junto al aeropuerto (aterrizó y luego despegó)
+// (a tiene que ir bajando y b subiendo: un despegue seguido de un aterrizaje es un vuelo de ida y vuelta, no un aparcado)
+const bajoCerca = (av, i) => av.ref && (av.al[i] === SUELO || (av.al[i] >= 0 && av.al[i] <= av.ref.elev + 2500)) && KM(av.la[i], av.lo[i], av.ref.lat, av.ref.lon) < 6;
+const llega = (av, i) => av.al[i] === SUELO || (i > 0 && av.al[i - 1] >= av.al[i] && av.al[i - 1] !== SUELO);
+const sale = (av, i) => av.al[i] === SUELO || (i < av.T.length - 1 && av.al[i + 1] >= av.al[i]);
+const aparcadoEntre = (av, a, b) => av.T[b] - av.T[a] <= 8 * 3600000 && (
+  (av.al[a] === SUELO && av.al[b] === SUELO && KM(av.la[a], av.lo[a], av.la[b], av.lo[b]) < 0.3)
+  || (av.T[b] - av.T[a] > 10 * MIN && bajoCerca(av, a) && bajoCerca(av, b) && llega(av, a) && sale(av, b)));
 
 // Posición del avión en T: interpolada entre dos puntos cercanos (≤ 2 min), el punto más próximo (≤ 1 min), o
 // «aparcado» si entre dos puntos en tierra en el mismo sitio hay un hueco largo (transpondedor apagado en el stand).
@@ -207,7 +216,7 @@ export function anclas(bursts, datos) {
     if (!reg || b.ai?.hay_avion === false) continue;
     const fiable = b.touched?.reg || (claveReg(b.ai?.matricula) === reg && b.ai?.confianza !== 'baja');
     const av = fiable && datos.porReg.get(reg);
-    if (av) out.push({ b, av, pared: horaPrincipal(b), w: Math.max(0.05, Math.min(1, 25 * MIN / av.presente)) });
+    if (av) out.push({ b, av, apt: datos.apt?.icao || '', pared: horaPrincipal(b), w: Math.max(0.05, Math.min(1, 25 * MIN / av.presente)) });
   }
   return out;
 }
@@ -216,7 +225,8 @@ export function anclas(bursts, datos) {
 // hora de su foto; entre esos, el que los deja más juntos (un spotter fotografía siempre la misma zona, y un avión que
 // aterriza recorre 4 km por minuto, así que un desfase de 1–2 min ya los separa). Con < 2 anclas útiles: sin calibrar.
 // manual: desfase en minutos escrito por el usuario (se usa tal cual).
-export function calibrar(an, tz, manual = null) {
+// ref: desfase que se da por bueno si cuadra igual de bien (0 = la hora de la cámara tal cual en la zona tz)
+export function calibrar(an, tz, manual = null, ref = 0) {
   const utiles = an.filter(a => a.w >= 0.2);
   const base = an.map(a => paredAUtc(a.pared, tz));
   const presencia = delta => {
@@ -228,13 +238,13 @@ export function calibrar(an, tz, manual = null) {
   // mediana de todas (5 km si no hay con quién comparar)
   const evaluar = delta => {
     const pos = [];
-    an.forEach((a, i) => { const e = estadoEn(a.av, base[i] + delta * MIN); if (e && seMueve(e)) pos.push({ T: e.T, lat: e.lat, lon: e.lon, i }); });
+    an.forEach((a, i) => { const e = estadoEn(a.av, base[i] + delta * MIN); if (e && seMueve(e)) pos.push({ T: e.T, lat: e.lat, lon: e.lon, i, apt: a.apt }); });
     const med = v => { v.sort((x, y) => x - y); return v[v.length >> 1]; };
     const por = pos.map(p => { const d = pos.filter(q => q !== p && Math.abs(q.T - p.T) < 90 * MIN).map(q => KM(p.lat, p.lon, q.lat, q.lon)); return d.length ? med(d) : null; }).filter(x => x != null);
     return { delta, pres: presencia(delta), disp: por.length >= 2 ? Math.min(5, med(por)) : 5, pos };
   };
   if (Number.isFinite(manual)) return { ...evaluar(manual), calibrado: true, manual: true, n: utiles.length, total: an.length };
-  const cero = evaluar(0);
+  const cero = evaluar(ref);
   if (utiles.length < 2) return { ...cero, calibrado: false, n: utiles.length, total: an.length };
   const pres = [];
   let max = 0;
@@ -244,7 +254,7 @@ export function calibrar(an, tz, manual = null) {
   for (const [d, p] of pres) if (p >= max - 0.5) { const e = evaluar(d); best = best ? mejor(best, e) : e; }
   const d0 = best.delta;
   for (let d = d0 - 1.5; d <= d0 + 1.5; d += 0.25) best = mejor(best, evaluar(d));
-  // si la hora local del aeropuerto ya cuadra igual de bien, la cámara iba bien
+  // si la hora de referencia ya cuadra igual de bien, se queda esa
   if (cero.pres >= best.pres - 0.5 && cero.disp <= best.disp + 0.2) best = cero;
   const enMov = new Set(best.pos.map(p => p.i));
   an.forEach((a, i) => { a.presente = !!estadoEn(a.av, base[i] + best.delta * MIN); a.enMovimiento = enMov.has(i); });
@@ -260,8 +270,9 @@ export function candidatos(b, datos, cal, tz) {
   let A = u(b.frames[0]) - 30000, B = u(b.frames[b.frames.length - 1]) + 30000;
   if (B - A > 5 * MIN) { const t = u(b.frames.find(f => f.name === b.n) || b.frames[0]); A = t - 45000; B = t + 45000; }   // ráfagas unidas
   const medio = (A + B) / 2;
-  const cerca = (cal.pos || []).filter(p => Math.abs(p.T - medio) < 60 * MIN);
-  const zona = cerca.length ? cerca : cal.pos || [];
+  const mismo = (cal.pos || []).filter(p => !p.apt || !datos.apt?.icao || p.apt === datos.apt.icao);
+  const cerca = mismo.filter(p => Math.abs(p.T - medio) < 60 * MIN);
+  const zona = cerca.length ? cerca : mismo;
   const out = [];
   for (const av of datos.aviones) {
     if (av.vehiculo || av.fin < A - 8 * 3600000 || av.ini > B + 8 * 3600000) continue;
@@ -314,6 +325,25 @@ export function decidir(b, cands, datos) {
   return { estado: 'candidatos', top: cands.filter(x => x.s >= a.s - 4 && x.ct !== -1 && x.parcial !== false).slice(0, 4) };
 }
 
+/* ---------------- v0.4.1 · qué avión pasaba por delante ---------------- */
+// El avión que pasaba por delante del spotter en el instante T (UTC): el que se movía más cerca de la zona donde
+// estaban, a la hora de sus fotos, los aviones ya identificados (cal.pos). null si no hay uno claro: ninguno a menos
+// de 1,5 km de la zona, o dos a distancias parecidas (< 0,7 km de diferencia). Hace falta la cámara en hora.
+export function delanteEn(datos, cal, T) {
+  const zona = (cal.pos || []).filter(p => (!p.apt || !datos.apt?.icao || p.apt === datos.apt.icao) && Math.abs(p.T - T) < 3 * 3600000);
+  if (!zona.length) return null;
+  let a = null, b = null;
+  for (const av of datos.aviones) {
+    if (av.vehiculo || av.fin < T - 2 * MIN || av.ini > T + 2 * MIN) continue;
+    const e = estadoEn(av, T);
+    if (!e || !seMueve(e)) continue;
+    const d = Math.min(...zona.map(p => KM(p.lat, p.lon, e.lat, e.lon)));
+    if (!a || d < a.d) { b = a; a = { av, d }; } else if (!b || d < b.d) b = { av, d };
+  }
+  if (!a || a.d > 1.5 || (b && b.d - a.d < 0.7)) return null;
+  return { reg: claveReg(a.av.r) || a.av.h.toUpperCase(), matricula: a.av.r || a.av.h.toUpperCase(), tipo: a.av.t || '', d: a.d };
+}
+
 /* ---------------- resumen para la web y para guardar ---------------- */
 // Días UTC que cubren las ráfagas con este desfase (para pedir los que falten si la cámara iba en otra zona horaria)
 export function fechasUtc(bursts, tz, delta) {
@@ -325,13 +355,13 @@ export function fechasUtc(bursts, tz, delta) {
   return [...out].sort();
 }
 const corto = c => ({ reg: c.reg, tipo: c.tipo || '', cs: c.cs || '', fase: c.fase, d: c.d == null ? null : Math.round(c.d * 10) / 10 });
-export function resumir(r, b, tz, cal) {
+export function resumir(r, b, tz, cal, tzMostrar = tz) {
   const out = { estado: r.estado, delta: cal.delta, calibrado: !!cal.calibrado };
-  if (r.c) Object.assign(out, corto(r.c), { hora: horaAeropuerto(r.c.T, tz), por: r.c.parcial ? 'parcial' : r.c.ct === 2 ? 'tipo' : r.c.ct === 1 ? 'familia' : '' });
+  if (r.c) Object.assign(out, corto(r.c), { hora: horaAeropuerto(r.c.T, tzMostrar), por: r.c.parcial ? 'parcial' : r.c.ct === 2 ? 'tipo' : r.c.ct === 1 ? 'familia' : '' });
   if (r.top) out.top = r.top.map(corto);
   if (r.av) {   // estuvo ese día, pero no a la hora de la foto: ¿cuándo?
     const t = paredAUtc(horaPrincipal(b), tz) + cal.delta * MIN, k = Math.min(r.av.T.length - 1, indice(r.av.T, t));
-    out.reg = r.av.r; out.tipo = r.av.t; out.hora = horaAeropuerto(r.av.T[k], tz);
+    out.reg = r.av.r; out.tipo = r.av.t; out.hora = horaAeropuerto(r.av.T[k], tzMostrar);
   }
   return out;
 }

@@ -73,10 +73,9 @@
     <div class="panel controls">
       <input type="file" id="pick" webkitdirectory directory multiple hidden>
       <button class="btn primary" id="pickBtn">Elegir carpeta</button>
-      <label class="field" for="gap" title="Si entre dos fotos pasan más segundos que esto, la web entiende que es otro avión">Otro avión si pasan más de <input type="number" id="gap" value="8" min="1" max="600"> s entre fotos</label>
-      <label class="field" for="apt">Aeropuerto <input type="text" id="apt" placeholder="LEVC" maxlength="4" class="icao"></label>
+      <label class="field" for="apt" title="Para los tramos de la carpeta que no tengan uno propio. Déjalo vacío y se detecta solo en cada tramo con las matrículas y el ADS-B.">Aeropuerto por defecto <input type="text" id="apt" placeholder="auto" maxlength="4" class="icao"></label>
       <label class="field" for="useAI" title="Lee matrícula, tipo y operador de la foto elegida de cada ráfaga. Se envía una copia reducida de esa foto a la IA; los RAW no salen de tu ordenador."><input type="checkbox" id="useAI" checked> Identificar con IA</label>
-      <label class="field" for="useADSB" title="Cruza la hora de cada ráfaga con el historial ADS-B del aeropuerto (adsb.lol) para confirmar la matrícula o proponerla cuando no se lee."><input type="checkbox" id="useADSB" checked> Cruzar con ADS-B</label>
+      <label class="field" for="useADSB" title="Cruza la hora de cada ráfaga con el historial ADS-B (adsb.lol): detecta el aeropuerto de cada tramo por sus matrículas, confirma la matrícula o la propone cuando no se lee."><input type="checkbox" id="useADSB" checked> Cruzar con ADS-B</label>
       <div class="progress" aria-hidden="true"><i id="bar"></i></div>
       <span class="stat" id="addStat">Los RAW se leen en tu ordenador; solo se guarda una miniatura de la foto elegida.</span>
     </div>

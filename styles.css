@@ -136,3 +136,8 @@ input.byai{border-color:var(--accent)}
 input.byadsb{border-color:var(--amber);border-style:dashed}
 #adsbDelta{width:76px}
 #adsbBar a{color:inherit}
+/* v0.4 · tramos de la carpeta, cada uno con su aeropuerto */
+.tramo{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:10px 14px;margin-top:6px}
+.tramo .tt{font-weight:700;font-variant-numeric:tabular-nums}
+.tramo .tdet{flex:1 1 280px;font-size:.88rem;color:var(--muted)}
+.tramo input.icao{width:5.5em;text-transform:uppercase;font-family:var(--f-mono)}
